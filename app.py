@@ -29,15 +29,14 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- THE MASTER UNIVERSAL ENGINE ---
+# --- UNIVERSAL ENGINE ---
 
 def get_year(url):
-    """Finds the 4-digit year anchor anywhere in the URL."""
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def check_universal_status(url, session):
-    """Surgical behavior check: Hard Redirects & Title Pivots."""
+    """Universal Sold Check: Focuses on URL Behavior & Title Pivots."""
     year = get_year(url)
     if not year: return "N/A"
     
@@ -49,54 +48,53 @@ def check_universal_status(url, session):
         soup = BeautifulSoup(response.text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # 1. HARD REDIRECT: Did we land on an inventory search page?
-        search_path = ['search', 'inventory', 'results', '.aspx', 'all-inventory']
+        # Logic 1: Hard Redirect to search/inventory
+        search_path = ['search', 'inventory', 'results', '.aspx', 'all-inventory', 'searchall']
         if any(x in final_url for x in search_path) and orig_url not in final_url:
             return "SOLD (Redirected)"
 
-        # 2. TITLE PIVOT: Does the title still contain the car's year?
-        # If the year is gone and the title is generic, the car is sold.
-        generic_terms = ['inventory', 'search', 'results', 'cars for sale', 'dealership']
-        if year not in page_title and any(x in page_title for x in generic_terms):
-            return "SOLD (Title Mismatch)"
-            
-        # 3. CONTENT CHECK: Explicit error text
-        if any(x in response.text.lower() for x in ["vehicle not found", "no longer available"]):
+        # Logic 2: Hard Content Error
+        if any(x in response.text.lower() for x in ["vehicle not found", "no longer available", "this vehicle has been sold"]):
             return "SOLD (Content)"
+            
+        # Logic 3: Title Pivot (Year in URL is missing from Title)
+        generic_terms = ['inventory', 'search', 'cars for sale', 'results', 'dealership']
+        if year not in page_title and any(x in page_title for x in generic_terms):
+            return "SOLD (Title Pivot)"
 
         return "Available"
     except:
         return "Available"
 
 def clean_name_universal(url):
-    """Strips VINs, dealership locations, and codes."""
+    """Universal Vehicle Name Extractor: Year + Model (Stripping VINs/Junk)."""
     year = get_year(url)
-    if not year: return "Unknown"
+    if not year: return "Unknown Vehicle"
     
-    # Isolate car details after the year
+    # Take everything after the year
     parts = url.split(year)
     rest = parts[-1].replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
     
     tokens = rest.split()
-    # Remove VINs (long alphanumeric) and junk words
-    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory']
+    # VIN-Killer: Remove words > 10 chars with numbers
+    # Junk-Killer: Remove dealer names/cities
+    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Shop']
     
-    clean_tokens = []
+    final_tokens = []
     for t in tokens:
         if len(t) > 10 and any(c.isdigit() for c in t): continue
         if t.title() in junk: continue
-        clean_tokens.append(t)
+        final_tokens.append(t)
         
-    return f"{year} {' '.join(clean_tokens)}".title().strip()
+    return f"{year} {' '.join(final_tokens)}".title().strip()
 
 @st.cache_data(show_spinner=False)
-def analyze_report(df_input):
+def analyze_data(df_input):
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
     urls = df_input['Page Url'].tolist()
     
-    # 20 workers: Fast but stable
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         df_input['Sold_Status'] = list(executor.map(lambda u: check_universal_status(u, session), urls))
     
     df_input['Is Sold'] = df_input['Sold_Status'].str.startswith('SOLD')
@@ -107,24 +105,36 @@ def analyze_report(df_input):
         u = str(u).lower()
         if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
         if any(x in u for x in ['search', 'inventory']):
-            if 'new' in u: return 'New Search'
-            if 'used' in u or 'preowned' in u: return 'Used Search'
+            if 'new' in u: return 'New Car Search'
+            if 'used' in u or 'preowned' in u: return 'Used Car Search'
             return 'General Search'
+        if any(x in u for x in ['service', 'parts', 'collision', 'appointment']): return 'Service'
         if get_year(u): return 'VDP'
         return 'Other'
     
     df_input['Category'] = df_input['Page Url'].apply(categorize)
-    df_input['Type'] = df_input['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+    
+    # Refined New/Used Logic: Folder priority, then Year
+    def classify(u):
+        u_low = str(u).lower()
+        year = get_year(u)
+        if 'used' in u_low or 'preowned' in u_low: return 'Used'
+        if 'new' in u_low: return 'New'
+        if year and int(year) >= 2025: return 'New'
+        return 'Used'
+        
+    df_input['Type'] = df_input['Page Url'].apply(classify)
     return df_input
 
-# --- DASHBOARD ---
+# --- UI ---
 st.title("🚗 Auto-Sales Intelligence Agent")
-uploaded_file = st.file_uploader("Upload Dealer Traffic CSV", type=['csv'])
+
+uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
     with st.spinner("Analyzing live inventory..."):
-        df = analyze_report(df_raw)
+        df = analyze_data(df_raw)
 
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'] == 'VDP']
@@ -140,7 +150,7 @@ if uploaded_file is not None:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Traffic Mix (Total Visitors)**")
-        st.bar_chart(df.groupby('Category')['Attributed Unique Visitors'].sum())
+        st.bar_chart(df.groupby('Category')['Attributed Unique Visitors'].sum().sort_values(ascending=False))
     with col2:
         st.markdown("**Sales Mix (New vs Used)**")
         if not sold_df.empty:
@@ -149,24 +159,32 @@ if uploaded_file is not None:
             ax.set_ylabel('')
             st.pyplot(fig)
 
-    # Tables: Now Aggregated by Model
+    # Tables - Now Aggregated by Model
     t1, t2 = st.columns(2)
     with t1:
-        st.subheader("🏆 Top Sold Models")
+        st.subheader("🏆 Top Sold Units (By Model)")
         if not sold_df.empty:
+            # Aggregate traffic by cleaned name and type
             top_sold = sold_df.groupby(['Vehicle Name', 'Type'])['Attributed Unique Visitors'].sum().reset_index()
             top_sold = top_sold.sort_values('Attributed Unique Visitors', ascending=False).head(10)
             top_sold.index = range(1, len(top_sold) + 1)
             st.dataframe(top_sold, use_container_width=True)
+        else:
+            st.info("No sales detected.")
+            
     with t2:
-        st.subheader("⚠️ High Interest / Unsold")
+        st.subheader("⚠️ Missed Opportunities")
         if not sold_df.empty:
             avg_v = sold_df['Attributed Unique Visitors'].mean()
-            available = df[(~df['Is Sold']) & (df['Category'] == 'VDP')]
-            missed = available.groupby(['Vehicle Name', 'Type'])['Attributed Unique Visitors'].sum().reset_index()
-            missed = missed[missed['Attributed Unique Visitors'] >= avg_v].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+            # Aggregate missed opportunities
+            available_vdp = df[(~df['Is Sold']) & (df['Category'] == 'VDP')]
+            missed = available_vdp.groupby(['Vehicle Name', 'Type'])['Attributed Unique Visitors'].sum().reset_index()
+            missed = missed[missed['Attributed Unique Visitors'] >= avg_v]
+            missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
             missed.index = range(1, len(missed) + 1)
             st.dataframe(missed, use_container_width=True)
+        else:
+            st.info("Awaiting sales data for benchmark.")
 
     st.divider()
     st.download_button("📥 Download Analysis CSV", df.to_csv(index=False), "Sales_Analysis.csv", "text/csv")
