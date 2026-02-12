@@ -214,7 +214,7 @@ if uploaded_file is not None:
     col_chart1, col_chart2 = st.columns(2)
     
     with col_chart1:
-        st.markdown("**Traffic Distribution (Visitors)**")
+        st.markdown("**Traffic Distribution (Total Visitors)**")
         cats = ['VDP', 'New Car Search', 'Used Car Search', 'General Search', 'Service', 'Homepage']
         
         # Sum visitors instead of counting rows
@@ -242,8 +242,12 @@ if uploaded_file is not None:
         st.subheader("🏆 Top Sold Vehicles")
         if sold_count > 0:
             top_sold = df[df['Is Sold']].sort_values('Attributed Unique Visitors', ascending=False).head(10)
-            # REMOVED 'Sold_Status' HERE
-            st.dataframe(top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True), use_container_width=True)
+            
+            # Reset index and increment by 1 for display
+            top_sold_display = top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True)
+            top_sold_display.index += 1
+            
+            st.dataframe(top_sold_display, use_container_width=True)
         else:
             st.info("No sold vehicles identified.")
             
@@ -255,7 +259,11 @@ if uploaded_file is not None:
         missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         
         if not missed.empty:
-            st.dataframe(missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True), use_container_width=True)
+            # Reset index and increment by 1 for display
+            missed_display = missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True)
+            missed_display.index += 1
+            
+            st.dataframe(missed_display, use_container_width=True)
         else:
             st.info("No missed opportunities found.")
 
