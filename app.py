@@ -33,7 +33,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- UNIVERSAL PARSING LOGIC (From Your Snippet) ---
+# --- UNIVERSAL PARSING LOGIC ---
 def extract_car_info_universal(url):
     """
     Attempts to extract Year, Make from ANY dealership URL.
@@ -83,7 +83,7 @@ def check_single_url(url):
     try:
         # 2. Request the page
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
         # Timeout set to 5 seconds for balance of speed/reliability
@@ -111,9 +111,7 @@ def check_single_url(url):
              return "SOLD (Redirected)"
 
         # C. Title Mismatch (The "Soft Redirect" Check)
-        # If URL expects "2024" but Title does not contain "2024"
         if year and str(year) not in page_title:
-            # Safety check: ensure title isn't just empty/broken
             if len(page_title) > 3:
                 return "SOLD (Title Mismatch)"
 
@@ -156,7 +154,6 @@ def extract_display_details(url):
             elif year <= 2024:
                 ctype = 'Used'
         except:
-            # Fallback
             if 'new' in str(url).lower(): ctype = 'New'
             elif 'used' in str(url).lower(): ctype = 'Used'
             
@@ -217,9 +214,12 @@ if uploaded_file is not None:
     col_chart1, col_chart2 = st.columns(2)
     
     with col_chart1:
-        st.markdown("**Traffic Distribution**")
+        st.markdown("**Traffic Distribution (Visitors)**")
         cats = ['VDP', 'New Car Search', 'Used Car Search', 'General Search', 'Service', 'Homepage']
-        traffic_data = df[df['Category'].isin(cats)]['Category'].value_counts()
+        
+        # FIX: Sum the 'Attributed Unique Visitors' instead of counting rows
+        traffic_data = df[df['Category'].isin(cats)].groupby('Category')['Attributed Unique Visitors'].sum()
+        
         if not traffic_data.empty:
             st.bar_chart(traffic_data)
         else:
@@ -252,14 +252,13 @@ if uploaded_file is not None:
         avg_traffic = sold_df['Attributed Unique Visitors'].mean() if sold_count > 0 else 0
         
         # Filter: Available + VDP + High Traffic
-        # We deliberately do NOT filter by 'New' or 'Used' here, so it shows ALL types.
         missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_traffic)]
         missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         
         if not missed.empty:
             st.dataframe(missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True), use_container_width=True)
         else:
-            st.info("No missed opportunities found (no available cars exceeded average sold traffic).")
+            st.info("No missed opportunities found.")
 
     # --- DOWNLOAD ---
     csv = df.to_csv(index=False).encode('utf-8')
