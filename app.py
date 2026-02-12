@@ -6,10 +6,9 @@ import concurrent.futures
 import matplotlib.pyplot as plt
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-import io
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Universal Sales Intelligence", layout="wide")
+st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
 # --- PASSWORD PROTECTION ---
 def check_password():
@@ -30,103 +29,101 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- REFINED UNIVERSAL LOGIC ---
+# --- UNIVERSAL ENGINE ---
 
-def extract_car_info_universal(url):
-    if not isinstance(url, str): return None, None
-    url_clean = url.lower().strip()
-    if any(x in url_clean.split('/')[-1] for x in ['search', 'inventory', 'all', 'index', '.aspx']):
-        return None, None
-    year_match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', url_clean)
-    if not year_match: return None, None
-    year = year_match.group(1)
-    return year
+def extract_year(url):
+    """Finds the 4-digit year anchor in any URL structure."""
+    match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
+    return match.group(1) if match else None
 
 def check_single_url(url):
-    year = extract_car_info_universal(url)
+    """Surgical Sold Detection: Accuracy over Aggression."""
+    year = extract_year(url)
     if not year: return "N/A"
+    
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+        # Allow 6 seconds for slow dealer sites
+        response = requests.get(url, headers=headers, timeout=6, allow_redirects=True)
+        
         final_url = response.url.lower()
         soup = BeautifulSoup(response.text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         page_text = response.text.lower()
 
-        # 1. Platform Hard Redirect (Most Reliable)
-        search_indicators = ['search', 'inventory', 'results', '.aspx', 'all-inventory']
+        # 1. HARD REDIRECT: Did we land on a search page?
+        search_indicators = ['search', 'inventory', 'results', '.aspx', 'all-inventory', 'searchall']
         if any(ind in final_url for ind in search_indicators) and url.lower().split('?')[0] not in final_url:
-            return "SOLD (Redirect)"
+            return "SOLD (Redirected)"
 
-        # 2. Page Content Sold Indicators
-        if any(p in page_text for p in ["vehicle not found", "no longer available", "sorry", "similar vehicles"]):
-            return "SOLD (Content)"
+        # 2. CLEAR CONTENT: Does the page say it's gone?
+        sold_phrases = ["vehicle not found", "no longer available", "sorry", "similar vehicles"]
+        if any(phrase in page_text for phrase in sold_phrases):
+            return "SOLD (Content Flag)"
         
-        # 3. Soft Title Check (Only if title is very generic)
-        if year not in page_title and any(x in page_title for x in ['inventory', 'search', 'results']):
-            return "SOLD (Title Soft Redirect)"
+        # 3. CONSERVATIVE TITLE CHECK: Only if it's explicitly an inventory page
+        if year not in page_title and any(x in page_title for x in ['inventory', 'results', 'search']):
+            return "SOLD (Title Soft-Redirect)"
 
         return "Available"
     except:
-        return "Available (Link Busy)" # Assume available if site times out to prevent false sold counts
+        # If site is busy/timed out, we assume Available to prevent false sold counts
+        return "Available"
 
 def clean_vehicle_name(url):
-    """Strips VINs, locations, and codes to leave Year Make Model."""
+    """Strips VINs, dealership names, and cities for a professional report."""
     url_path = urlparse(url).path
     match = re.search(r'((?:19|20)\d{2}.*)', url_path)
     if match:
         name = match.group(1).replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '')
-        # Remove VINs (Long strings of random letters/numbers)
-        name = re.sub(r'[A-Z0-9]{10,}', '', name)
-        # Remove common Dealer Locations
-        name = re.sub(r'Baltimore|Ephrata|Maryland|Jeep|Chrysler|Ford', '', name, flags=re.IGNORECASE)
-        # Clean double spaces
-        name = re.sub(' +', ' ', name)
-        return name.title().strip()
+        # Delete any word longer than 10 chars (likely a VIN or ID)
+        tokens = [w for w in name.split() if not (len(w) > 10 and any(c.isdigit() for c in w))]
+        # Delete dealer/location junk
+        junk = ['Baltimore', 'Ephrata', 'Maryland', 'Jeep', 'Chrysler', 'Ford', 'Dodge', 'Ram', 'Heritage', 'Twin', 'Pine', 'Md', 'Wholesale']
+        clean_tokens = [t for t in tokens if t.title() not in junk]
+        return " ".join(clean_tokens).title().strip()
     return "Unknown Vehicle"
+
+@st.cache_data(show_spinner=False)
+def process_data(df_input):
+    """Cached analysis to stop the spinning circle."""
+    urls = df_input['Page Url'].tolist()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        status_results = list(executor.map(check_single_url, urls))
+    
+    df_input['Sold_Status'] = status_results
+    df_input['Is Sold'] = df_input['Sold_Status'].str.startswith('SOLD')
+    df_input['Vehicle Name'] = df_input['Page Url'].apply(clean_vehicle_name)
+    df_input['Category'] = df_input['Page Url'].apply(lambda u: 'Homepage' if str(u).endswith('.com/') else ('Search/Inventory' if 'search' in str(u).lower() or 'inventory' in str(u).lower() else ('VDP' if extract_year(u) else 'Other')))
+    df_input['Type'] = df_input['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+    return df_input
 
 # --- UI ---
 st.title("🚗 Universal Sales Intelligence Agent")
-uploaded_file = st.file_uploader("Upload Raw Traffic CSV", type=['csv'])
+
+uploaded_file = st.file_uploader("Upload Traffic CSV", type=['csv'])
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    st.info(f"Analyzing {len(df)} URLs using High-Speed 20-worker threading...")
+    raw_df = pd.read_csv(uploaded_file)
     
-    # Run Checks
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        status_results = list(executor.map(check_single_url, df['Page Url'].tolist()))
-        
-    df['Sold_Status'] = status_results
-    df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
-    df['Vehicle Name'] = df['Page Url'].apply(clean_vehicle_name)
-    df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', x) else 'Used')
-    
-    # Categorize
-    def get_cat(url):
-        u = url.lower()
-        if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
-        if any(x in u for x in ['search', 'inventory']): return 'Search/Inventory'
-        if re.search(r'(?:19|20)\d{2}', u): return 'VDP'
-        return 'Other'
-    df['Category'] = df['Page Url'].apply(get_cat)
+    with st.spinner("Agent is analyzing live URLs... (takes ~20 seconds)"):
+        df = process_data(raw_df)
 
-    st.success("Analysis Complete!")
-    st.divider()
-
-    # --- METRICS ---
+    # --- DASHBOARD ---
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'] == 'VDP']
+    
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Sold", len(sold_df))
+    c1.metric("Total Cars Sold", len(sold_df))
     c2.metric("New Sold", len(sold_df[sold_df['Type'] == 'New']))
     c3.metric("Used Sold", len(sold_df[sold_df['Type'] == 'Used']))
     c4.metric("Look-to-Book", f"{(len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0):.1f}%")
 
     # --- VISUALS ---
+    st.divider()
     col_chart1, col_chart2 = st.columns(2)
     with col_chart1:
-        st.markdown("**Traffic Mix (Visitors)**")
+        st.markdown("**Traffic Mix (Total Visitors)**")
         traffic = df.groupby('Category')['Attributed Unique Visitors'].sum().sort_values(ascending=False)
         st.bar_chart(traffic)
     with col_chart2:
@@ -145,17 +142,11 @@ if uploaded_file is not None:
         top_sold.index += 1
         st.dataframe(top_sold, use_container_width=True)
     with t2:
-        st.subheader("⚠️ Missed Opportunities")
+        st.subheader("⚠️ High Interest / Unsold")
         avg_v = sold_df['Attributed Unique Visitors'].mean() if len(sold_df)>0 else 0
         missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)[['Vehicle Name', 'Type', 'Attributed Unique Visitors']].reset_index(drop=True)
         missed.index += 1
         st.dataframe(missed, use_container_width=True)
 
-    # --- EXPORT ---
     st.divider()
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        st.download_button("📥 Download Analysis (CSV)", df.to_csv(index=False), "Sales_Analysis.csv", "text/csv")
-    with col_dl2:
-        # Simplest PDF work-around for Streamlit (printing the current view)
-        st.info("💡 To save as PDF: Press **Ctrl+P** (Windows) or **Cmd+P** (Mac) and select 'Save as PDF'.")
+    st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), "Sales_Analysis.csv", "text/csv")
