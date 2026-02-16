@@ -36,7 +36,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- THE VALUATION ENGINE (SMART v3.6) ---
+# --- THE VALUATION ENGINE (SMART v3.5) ---
 
 def estimate_value(row):
     """
@@ -170,7 +170,8 @@ def check_universal_status(url, session):
     
     try:
         # OPTIMIZATION: stream=True allows us to check the URL *before* downloading the body
-        response = session.get(url, timeout=5, allow_redirects=True, stream=True)
+        # Reduced timeout to 3s to Fail Fast if connection hangs
+        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
         
         # 1. Fast Redirect Check
         # If the final URL contains 'inventory' or 'search', it's likely a redirect from a dead VDP.
@@ -195,7 +196,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.6")
+st.title("🚗 Auto-Sales Intelligence Agent v3.7")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -217,14 +218,15 @@ if uploaded_file is not None:
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=50, pool_maxsize=50)
+        # Optimized Pool for 60 Threads
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        # 3. Scan with Reduced Workers (40) for Stability
+        # 3. Scan with "Sweet Spot" Workers (60)
         vdp_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
             future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
             for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
                 url = future_to_url[future]
