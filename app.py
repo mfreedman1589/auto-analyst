@@ -84,7 +84,7 @@ def clean_name_universal(url):
     if not year: return "Unknown Vehicle"
     
     path = urlparse(url).path.lower()
-    brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi']
+    brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi', 'Cadillac', 'Buick', 'Acura', 'Infiniti', 'Lincoln', 'Land Rover', 'Jaguar', 'Porsche', 'Mini']
     make = ""
     for b in brands:
         if b.lower() in path:
@@ -179,55 +179,4 @@ if uploaded_file is not None:
         
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Sold", len(sold_df))
-        c2.metric("New Sold", len(sold_df[sold_df['Type'] == 'New']))
-        c3.metric("Used Sold", len(sold_df[sold_df['Type'] == 'Used']))
-        c4.metric("Look-to-Book", f"{(len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0):.1f}%")
-
-        st.divider()
-        
-        # --- VISUALS ---
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Traffic Mix (Total Visitors)**")
-            traffic = df.groupby('Category')['Attributed Unique Visitors'].sum().sort_values(ascending=False)
-            st.bar_chart(traffic)
-        with col2:
-            st.markdown("**Sales Mix**")
-            if not sold_df.empty:
-                fig, ax = plt.subplots()
-                sold_df['Type'].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, colors=['#4F81BD', '#C0504D'])
-                ax.set_ylabel('')
-                st.pyplot(fig)
-
-        # --- TABLES ---
-        t1, t2 = st.columns(2)
-        with t1:
-            st.subheader("🏆 Top Sold Units")
-            if not sold_df.empty:
-                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(15)
-                top_sold_disp = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors']].reset_index(drop=True)
-                top_sold_disp.index += 1
-                st.dataframe(top_sold_disp, use_container_width=True)
-            else:
-                st.info("No sales identified.")
-                
-        with t2:
-            st.subheader("⚠️ Missed Opportunities")
-            if not sold_df.empty:
-                avg_v = sold_df['Attributed Unique Visitors'].mean()
-                missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
-                missed_disp = missed.sort_values('Attributed Unique Visitors', ascending=False).head(15)[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors']].reset_index(drop=True)
-                missed_disp.index += 1
-                st.dataframe(missed_disp, use_container_width=True)
-
-        # --- EXPORT ---
-        st.divider()
-        ex1, ex2 = st.columns(2)
-        with ex1:
-            st.download_button("📥 Download Sold List (CSV)", 
-                               sold_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors']].to_csv(index=False), 
-                               "Sold_Vehicles_Report.csv", "text/csv")
-        with ex2:
-            st.download_button("📥 Download Full Analysis (CSV)", 
-                               df.to_csv(index=False), 
-                               "Full_Market_Analysis.csv", "text/csv")
+        c2.metric("
