@@ -36,7 +36,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- THE VALUATION ENGINE (SMART v3.5) ---
+# --- THE VALUATION ENGINE (SMART v3.6) ---
 
 def estimate_value(row):
     """
@@ -104,7 +104,7 @@ def estimate_value(row):
     # Depreciation Logic for USED cars only
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
-    current_year = datetime.datetime.now().year + 1 # Contextual "Next Year" for valuation safety
+    current_year = datetime.datetime.now().year + 1
     age = current_year - year
     
     if age <= 0:
@@ -160,9 +160,9 @@ def categorize(u):
 
 def check_universal_status(url, session):
     """
-    Optimized 'Streamline' Logic:
+    Optimized 'Streamline' Logic with Retry:
     1. Peek at Headers (stream=True).
-    2. If Redirected to Inventory -> SOLD (No download needed).
+    2. If Redirected to Inventory -> SOLD.
     3. If not -> Download Body & Check Title.
     """
     year = get_year(url)
@@ -170,20 +170,18 @@ def check_universal_status(url, session):
     
     try:
         # OPTIMIZATION: stream=True allows us to check the URL *before* downloading the body
-        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
+        response = session.get(url, timeout=5, allow_redirects=True, stream=True)
         
         # 1. Fast Redirect Check
         # If the final URL contains 'inventory' or 'search', it's likely a redirect from a dead VDP.
         final_url = response.url.lower()
         search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
         
-        # If we are on a search page, but the original URL wasn't a search page... it's SOLD.
         if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
-            response.close() # Cut the connection, don't download the body
+            response.close()
             return "SOLD (Hard Redirect)"
             
         # 2. Title Check (Requires Body Download)
-        # If we passed the redirect check, we must read the content.
         text = response.text 
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
@@ -197,7 +195,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.5")
+st.title("🚗 Auto-Sales Intelligence Agent v3.6")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -212,17 +210,21 @@ if uploaded_file is not None:
         st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
         progress_bar = st.progress(0)
         
-        # 2. Session
+        # 2. Session with Retry Strategy
         session = requests.Session()
-        # High connection pool for 100 threads
-        adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200)
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=50, pool_maxsize=50)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        # 3. Scan
+        # 3. Scan with Reduced Workers (40) for Stability
         vdp_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
             future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
             for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
                 url = future_to_url[future]
@@ -333,13 +335,11 @@ if uploaded_file is not None:
         st.divider()
         ex1, ex2 = st.columns(2)
         with ex1:
-            # Simplified Sold Report (Requested Columns Only)
             simple_sold = sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']]
             st.download_button("📥 Download Sold Report (CSV)", 
                                simple_sold.to_csv(index=False), 
                                "Sold_Vehicles_Report.csv", "text/csv")
         with ex2:
-            # Full Report (All Data)
             st.download_button("📥 Download Full Analysis (CSV)", 
                                df.to_csv(index=False), 
                                "Full_Market_Analysis.csv", "text/csv")
