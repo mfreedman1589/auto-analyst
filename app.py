@@ -148,22 +148,34 @@ def categorize(u):
 
 def check_universal_status(url, session):
     """
-    Original 'Lightweight' Logic:
-    1. Fetch URL.
-    2. Check if the YEAR from the URL exists in the Page Title.
+    Optimized 'Streamline' Logic:
+    1. Peek at Headers (stream=True).
+    2. If Redirected to Inventory -> SOLD (No download needed).
+    3. If not -> Download Body & Check Title.
     """
     year = get_year(url)
     if not year: return "N/A"
     
     try:
-        # 1. Fetch
-        response = session.get(url, timeout=3, allow_redirects=True)
+        # OPTIMIZATION: stream=True allows us to check the URL *before* downloading the body
+        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
         
-        # 2. Parse Title Only (Very Fast)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # 1. Fast Redirect Check
+        # If the final URL contains 'inventory' or 'search', it's likely a redirect from a dead VDP.
+        final_url = response.url.lower()
+        search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
+        
+        # If we are on a search page, but the original URL wasn't a search page... it's SOLD.
+        if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
+            response.close() # Cut the connection, don't download the body
+            return "SOLD (Hard Redirect)"
+            
+        # 2. Title Check (Requires Body Download)
+        # If we passed the redirect check, we must read the content.
+        text = response.text 
+        soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # 3. The Logic: If URL Year is NOT in Title -> SOLD
         if year not in page_title and len(page_title) > 5:
             return "SOLD (Soft Redirect)"
             
@@ -173,7 +185,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.3 (Lightweight)")
+st.title("🚗 Auto-Sales Intelligence Agent v3.4 (Streamline)")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
