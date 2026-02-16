@@ -36,11 +36,18 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- THE VALUATION ENGINE ---
+# --- THE VALUATION ENGINE (SMART v3.5) ---
 
 def estimate_value(row):
-    """Tiered Valuation Algorithm (Internal Use Only)"""
+    """
+    Tiered Valuation Algorithm:
+    1. Checks for specific MODEL match.
+    2. Checks for NEW vs USED status.
+    3. If New: Returns Baseline.
+    4. If Used: Applies Age Depreciation.
+    """
     name = str(row['Vehicle Name']).lower()
+    vehicle_type = str(row['Type']).lower() # Check if New or Used
     
     # --- LEVEL 1: MODEL SPECIFIC BASELINES ---
     MODEL_PRICES = {
@@ -89,7 +96,12 @@ def estimate_value(row):
             if brand in name:
                 baseline = price
                 break
-
+    
+    # LOGIC UPDATE: If New, use Full Baseline.
+    if 'new' in vehicle_type:
+        return int(baseline)
+    
+    # Depreciation Logic for USED cars only
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
     current_year = datetime.datetime.now().year + 1
@@ -185,7 +197,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.4 (Streamline)")
+st.title("🚗 Auto-Sales Intelligence Agent v3.5 (Streamline)")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
