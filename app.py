@@ -5,7 +5,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import re
 import concurrent.futures
-import plotly.express as px  # New for interactive charts
+import plotly.express as px  
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import datetime
@@ -173,7 +173,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.0")
+st.title("🚗 Auto-Sales Intelligence Agent v3.1")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -274,7 +274,6 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # Removed 'Est. Value' from display
                 display_sold = top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
@@ -293,7 +292,6 @@ if uploaded_file is not None:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
                 missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # Removed 'Est. Value' from display
                 display_missed = missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
