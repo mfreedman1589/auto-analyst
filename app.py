@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import re
 import concurrent.futures
 import matplotlib.pyplot as plt
@@ -38,38 +40,43 @@ def get_year(url):
 
 def extract_vin(url):
     """Extracts the VIN or unique ID from the end of the URL path."""
-    # Scans for the alphanumeric string at the end of the link (before extensions)
     match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|$|\?)', str(url))
     return match.group(1).upper() if match else "N/A"
 
 def check_universal_status(url, session):
-    """Simplified Universal Logic: Year-in-URL vs Year-in-Title."""
+    """Simplified Universal Logic with High-Speed optimizations."""
     year = get_year(url)
     if not year: return "N/A"
     
     try:
-        response = session.get(url, timeout=6, allow_redirects=True)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        page_title = soup.title.string.strip().lower() if soup.title else ""
+        # Fast 3-second timeout to prevent hanging
+        response = session.get(url, timeout=3, allow_redirects=True)
         
-        # 1. THE UNIVERSAL RULE: If Year is in URL but NOT in Title, it's SOLD.
-        if year not in page_title and len(page_title) > 5:
-            return "SOLD (Soft Redirect)"
-
-        # 2. HARD REDIRECT check
+        # Quick checks on the response
         final_url = response.url.lower().rstrip('/')
         orig_url = url.lower().split('?')[0].rstrip('/')
+        
+        # 1. HARD REDIRECT check (Fastest check)
         search_path = ['search', 'inventory', 'results', '.aspx', 'all-inventory', 'index.htm']
         if any(x in final_url for x in search_path) and orig_url not in final_url:
             return "SOLD (Hard Redirect)"
 
+        # Only parse HTML if necessary (saves CPU)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        page_title = soup.title.string.strip().lower() if soup.title else ""
+        
+        # 2. SOFT REDIRECT: If Year is in URL but NOT in Title, it's SOLD.
+        if year not in page_title and len(page_title) > 5:
+            return "SOLD (Soft Redirect)"
+
         # 3. CONTENT CHECK
-        if any(x in response.text.lower() for x in ["vehicle not found", "no longer available"]):
+        page_text = response.text.lower()
+        if "vehicle not found" in page_text or "no longer available" in page_text:
             return "SOLD (Content)"
 
         return "Available"
     except:
-        return "Available"
+        return "Available" # Default to available if connection fails
 
 def clean_name_universal(url):
     """Universal Name Extractor: Year + Brand + Model."""
@@ -77,7 +84,7 @@ def clean_name_universal(url):
     if not year: return "Unknown Vehicle"
     
     path = urlparse(url).path.lower()
-    brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia']
+    brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi']
     make = ""
     for b in brands:
         if b.lower() in path:
@@ -86,7 +93,7 @@ def clean_name_universal(url):
             
     rest = url.split(year)[-1].replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
     tokens = rest.split()
-    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service']
+    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers']
     
     clean_tokens = []
     for t in tokens:
@@ -98,15 +105,20 @@ def clean_name_universal(url):
 
 @st.cache_data(show_spinner=False)
 def analyze_data(df_input):
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
     urls = df_input['Page Url'].tolist()
     
+    # --- HIGH PERFORMANCE SESSION SETUP ---
+    session = requests.Session()
+    # Increase pool size to allow 50+ simultaneous connections
+    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
+    
     status_results = [None] * len(urls)
-    # Using a progress bar inside the cached function
-    # Note: st.progress works best when called in the main flow, 
-    # but we'll use concurrent.futures for speed here.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    
+    # 50 Workers for maximum throughput
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         status_results = list(executor.map(lambda u: check_universal_status(u, session), urls))
 
     df_input['Sold_Status'] = status_results
@@ -136,17 +148,22 @@ uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
     
-    # We run the analysis here to use the progress bar visually
     if st.button("🚀 Analyze Traffic"):
-        st.info(f"Scanning {len(df_raw)} URLs. Please wait...")
+        st.info(f"Scanning {len(df_raw)} URLs with High-Speed Engine (50 Threads). Please wait...")
         progress_bar = st.progress(0)
         
         urls = df_raw['Page Url'].tolist()
         status_results = [None] * len(urls)
+        
+        # --- UI-LINKED SESSION SETUP ---
         session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        # Run with progress updates
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
             future_to_index = {executor.submit(check_universal_status, url, session): i for i, url in enumerate(urls)}
             for i, future in enumerate(concurrent.futures.as_completed(future_to_index)):
                 idx = future_to_index[future]
@@ -154,7 +171,7 @@ if uploaded_file is not None:
                 progress_bar.progress((i + 1) / len(urls))
 
         df_raw['Sold_Status'] = status_results
-        df = analyze_data(df_raw) # This will clean names and categorize using the status results
+        df = analyze_data(df_raw)
 
         # --- METRICS ---
         sold_df = df[df['Is Sold']]
@@ -185,7 +202,7 @@ if uploaded_file is not None:
         # --- TABLES ---
         t1, t2 = st.columns(2)
         with t1:
-            st.subheader("🏆 Top Sold Units (Individual)")
+            st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(15)
                 top_sold_disp = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors']].reset_index(drop=True)
