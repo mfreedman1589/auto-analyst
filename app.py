@@ -43,7 +43,7 @@ def estimate_value(row):
     Tiered Valuation Algorithm:
     1. Checks for specific MODEL match.
     2. Checks for NEW vs USED status.
-    3. If New: Returns Baseline.
+    3. If New: Returns Baseline (MSRP).
     4. If Used: Applies Age Depreciation.
     """
     name = str(row['Vehicle Name']).lower()
@@ -104,7 +104,7 @@ def estimate_value(row):
     # Depreciation Logic for USED cars only
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
-    current_year = datetime.datetime.now().year + 1
+    current_year = datetime.datetime.now().year + 1 # Contextual "Next Year" for valuation safety
     age = current_year - year
     
     if age <= 0:
@@ -197,7 +197,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.5 (Streamline)")
+st.title("🚗 Auto-Sales Intelligence Agent v3.5")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -299,7 +299,6 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # Removed 'Est. Value' from display
                 display_sold = top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
@@ -318,7 +317,6 @@ if uploaded_file is not None:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
                 missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # Removed 'Est. Value' from display
                 display_missed = missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
@@ -345,3 +343,38 @@ if uploaded_file is not None:
             st.download_button("📥 Download Full Analysis (CSV)", 
                                df.to_csv(index=False), 
                                "Full_Market_Analysis.csv", "text/csv")
+
+        # --- GLOSSARY ---
+        st.divider()
+        with st.expander("ℹ️ Glossary & Guide: How to read this report"):
+            st.markdown("""
+            ### **Definitions & Insights**
+            
+            **1. Units Sold**
+            The total count of vehicles that were identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site was actively shopping for cars that moved off the lot.
+            
+            **2. Estimated Value (Rev & Pipeline)**
+            A data-driven approximation of the inventory's dollar value. 
+            * **New Cars:** Calculated using 2025/2026 Base MSRP for the specific model.
+            * **Used Cars:** Calculated using the base MSRP depreciated by age (-15% Yr 1, -10% Yrs 2+).
+            * *Note: This is a directional estimate to gauge "Total Pipeline Power" and does not account for specific trim levels, options, or dealer markups.*
+            
+            **3. Look-to-Book Ratio**
+            The efficiency metric of your inventory. It measures the conversion velocity of the cars we drove traffic to.
+            * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
+            * *Insight:* A higher percentage (20%+) indicates high-quality traffic meeting "Market Correct" inventory. A lower percentage suggests plenty of shoppers, but hesitation to buy (pricing/merchandising issues).
+            
+            **4. Top Sold Units**
+            The specific "Sold" vehicles that received the highest volume of exposure from our traffic. This highlights the specific models where our audience demand matched your sales success.
+            
+            **5. Missed Opportunities**
+            **"The Watch List."** These are active vehicles receiving **above-average traffic** but haven't sold yet. 
+            * *Why this matters:* You are paying for popularity, but not getting the sale. 
+            * *Action Item:* Audit these VDPs immediately. Check for **missing photos**, **"Call for Price" buttons** (which lower conversion), or **pricing outliers**. These units are "High Interest" and likely just need a small nudge to sell.
+            
+            **6. Traffic Mix**
+            A breakdown of where our audience lands and navigates.
+            * **VDP (Vehicle Detail Page):** The "Money Page." High VDP traffic proves the audience is "Deep Funnel"—shopping for specific VINs rather than just browsing.
+            * **Service/Parts:** Captures fixed-ops intent.
+            * **New vs. Used:** Helps align your marketing spend with actual inventory interest.
+            """)
