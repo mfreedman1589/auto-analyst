@@ -5,9 +5,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import re
 import concurrent.futures
-import plotly.express as px  
+import plotly.express as px
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
 import datetime
 
 # --- CONFIGURATION ---
@@ -150,21 +150,27 @@ def check_universal_status(url, session):
     year = get_year(url)
     if not year: return "N/A"
     try:
+        # Optimization 1: Fast Timeout
         response = session.get(url, timeout=3, allow_redirects=True)
         final_url = response.url.lower().rstrip('/')
         orig_url = url.lower().split('?')[0].rstrip('/')
         
+        # Optimization 2: Hard Redirect Check (No Parsing needed)
         search_path = ['search', 'inventory', 'results', '.aspx', 'all-inventory', 'index.htm']
         if any(x in final_url for x in search_path) and orig_url not in final_url:
             return "SOLD (Hard Redirect)"
 
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Optimization 3: SoupStrainer (Only parse the TITLE tag, ignore the rest)
+        # This is massively faster than parsing the whole HTML tree
+        parse_only = SoupStrainer('title')
+        soup = BeautifulSoup(response.text, 'lxml', parse_only=parse_only)
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
         if year not in page_title and len(page_title) > 5:
             return "SOLD (Soft Redirect)"
 
-        page_text = response.text.lower()
+        # Optimization 4: Raw Text Search (Don't parse HTML for this)
+        page_text = response.text.lower() # Raw string search is faster than DOM traversal
         if "vehicle not found" in page_text or "no longer available" in page_text:
             return "SOLD (Content)"
 
@@ -173,7 +179,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v3.1")
+st.title("🚗 Auto-Sales Intelligence Agent v3.2 (Turbo)")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -190,14 +196,15 @@ if uploaded_file is not None:
         
         # 2. Session
         session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+        # Optimization 5: Increase Pool Size for 100 Threads
+        adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        # 3. Scan
+        # 3. Scan with 100 Workers
         vdp_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
             future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
             for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
                 url = future_to_url[future]
@@ -274,6 +281,7 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                # Removed 'Est. Value' from display
                 display_sold = top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
@@ -292,6 +300,7 @@ if uploaded_file is not None:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
                 missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                # Removed 'Est. Value' from display
                 display_missed = missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
