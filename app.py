@@ -179,4 +179,78 @@ if uploaded_file is not None:
         
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Sold", len(sold_df))
-        c2.metric("
+        c2.metric("New Sold", len(sold_df[sold_df['Type'] == 'New']))
+        c3.metric("Used Sold", len(sold_df[sold_df['Type'] == 'Used']))
+        c4.metric("Look-to-Book", f"{(len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0):.1f}%")
+
+        st.divider()
+        
+        # --- VISUALS ---
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Traffic Mix (Total Visitors)**")
+            traffic = df.groupby('Category')['Attributed Unique Visitors'].sum().sort_values(ascending=False)
+            st.bar_chart(traffic)
+        with col2:
+            st.markdown("**Sales Mix**")
+            if not sold_df.empty:
+                fig, ax = plt.subplots()
+                sold_df['Type'].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, colors=['#4F81BD', '#C0504D'])
+                ax.set_ylabel('')
+                st.pyplot(fig)
+
+        # --- TABLES WITH CLICKABLE LINKS ---
+        t1, t2 = st.columns(2)
+        
+        # Helper to format dataframe for display with links
+        def format_for_display(data):
+            display_df = data[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].copy()
+            return display_df
+
+        with t1:
+            st.subheader("🏆 Top Sold Units")
+            if not sold_df.empty:
+                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(15)
+                # Create a config to render the 'Page Url' as a link inside 'Vehicle Name'
+                # But Streamlit's LinkColumn requires the link to be in the column data.
+                # So we display the Vehicle Name, but the underlying column is the Link.
+                
+                # Better approach for Streamlit: display 'Vehicle Name' and make 'Page Url' a clickable link column
+                st.dataframe(
+                    top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True),
+                    column_config={
+                        "Page Url": st.column_config.LinkColumn("Link", display_text="Open Link"),
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
+                    },
+                    use_container_width=True
+                )
+            else:
+                st.info("No sales identified.")
+                
+        with t2:
+            st.subheader("⚠️ Missed Opportunities")
+            if not sold_df.empty:
+                avg_v = sold_df['Attributed Unique Visitors'].mean()
+                missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
+                missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(15)
+                
+                st.dataframe(
+                    missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True),
+                    column_config={
+                        "Page Url": st.column_config.LinkColumn("Link", display_text="Open Link"),
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
+                    },
+                    use_container_width=True
+                )
+
+        # --- EXPORT ---
+        st.divider()
+        ex1, ex2 = st.columns(2)
+        with ex1:
+            st.download_button("📥 Download Sold List (CSV)", 
+                               sold_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].to_csv(index=False), 
+                               "Sold_Vehicles_Report.csv", "text/csv")
+        with ex2:
+            st.download_button("📥 Download Full Analysis (CSV)", 
+                               df.to_csv(index=False), 
+                               "Full_Market_Analysis.csv", "text/csv")
