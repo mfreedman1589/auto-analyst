@@ -103,43 +103,16 @@ def clean_name_universal(url):
         
     return f"{year} {make} {' '.join(clean_tokens)}".title().strip()
 
-@st.cache_data(show_spinner=False)
-def analyze_data(df_input):
-    urls = df_input['Page Url'].tolist()
-    
-    # --- HIGH PERFORMANCE SESSION SETUP ---
-    session = requests.Session()
-    # Increase pool size to allow 50+ simultaneous connections
-    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
-    session.mount('https://', adapter)
-    session.mount('http://', adapter)
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
-    
-    status_results = [None] * len(urls)
-    
-    # 50 Workers for maximum throughput
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        status_results = list(executor.map(lambda u: check_universal_status(u, session), urls))
-
-    df_input['Sold_Status'] = status_results
-    df_input['Is Sold'] = df_input['Sold_Status'].str.startswith('SOLD')
-    df_input['Vehicle Name'] = df_input['Page Url'].apply(clean_name_universal)
-    df_input['VIN'] = df_input['Page Url'].apply(extract_vin)
-    df_input['Type'] = df_input['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
-    
-    def categorize(u):
-        u = str(u).lower()
-        if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
-        if any(x in u for x in ['search', 'inventory']):
-            if 'new' in u: return 'New Car Search'
-            if 'used' in u or 'preowned' in u: return 'Used Car Search'
-            return 'General Search'
-        if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
-        if get_year(u): return 'VDP'
-        return 'Other'
-    
-    df_input['Category'] = df_input['Page Url'].apply(categorize)
-    return df_input
+def categorize(u):
+    u = str(u).lower()
+    if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
+    if any(x in u for x in ['search', 'inventory']):
+        if 'new' in u: return 'New Car Search'
+        if 'used' in u or 'preowned' in u: return 'Used Car Search'
+        return 'General Search'
+    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+    if get_year(u): return 'VDP'
+    return 'Other'
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
@@ -149,30 +122,40 @@ if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
     
     if st.button("🚀 Analyze Traffic"):
-        st.info(f"Scanning {len(df_raw)} URLs with High-Speed Engine (50 Threads). Please wait...")
+        # 1. Pre-process to identify VDPs (Smart Filtering)
+        df_raw['Category'] = df_raw['Page Url'].apply(categorize)
+        vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
+        
+        st.info(f"Identified {len(vdp_urls)} Vehicles out of {len(df_raw)} total links. Scanning Vehicles now...")
         progress_bar = st.progress(0)
         
-        urls = df_raw['Page Url'].tolist()
-        status_results = [None] * len(urls)
-        
-        # --- UI-LINKED SESSION SETUP ---
+        # 2. Setup High-Speed Session
         session = requests.Session()
         adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        # Run with progress updates
+        # 3. Scan ONLY VDPs
+        vdp_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-            future_to_index = {executor.submit(check_universal_status, url, session): i for i, url in enumerate(urls)}
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_index)):
-                idx = future_to_index[future]
-                status_results[idx] = future.result()
-                progress_bar.progress((i + 1) / len(urls))
+            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+                url = future_to_url[future]
+                vdp_results[url] = future.result()
+                progress_bar.progress((i + 1) / len(vdp_urls))
 
-        df_raw['Sold_Status'] = status_results
-        df = analyze_data(df_raw)
-
+        # 4. Map results back to the main DataFrame
+        # Non-VDPs get "N/A" status automatically
+        df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
+        
+        # 5. Final Data Processing
+        df = df_raw.copy()
+        df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
+        df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
+        df['VIN'] = df['Page Url'].apply(extract_vin)
+        df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+        
         # --- METRICS ---
         sold_df = df[df['Is Sold']]
         vdp_df = df[df['Category'] == 'VDP']
@@ -199,25 +182,21 @@ if uploaded_file is not None:
                 ax.set_ylabel('')
                 st.pyplot(fig)
 
-        # --- TABLES WITH CLICKABLE LINKS ---
+        # --- TABLES (Fixed Index & Limits) ---
         t1, t2 = st.columns(2)
         
-        # Helper to format dataframe for display with links
-        def format_for_display(data):
-            display_df = data[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].copy()
-            return display_df
-
         with t1:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
-                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(15)
-                # Create a config to render the 'Page Url' as a link inside 'Vehicle Name'
-                # But Streamlit's LinkColumn requires the link to be in the column data.
-                # So we display the Vehicle Name, but the underlying column is the Link.
+                # Limit to 10
+                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
                 
-                # Better approach for Streamlit: display 'Vehicle Name' and make 'Page Url' a clickable link column
+                # Create display DF and fix index to start at 1
+                display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                display_sold.index += 1
+                
                 st.dataframe(
-                    top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True),
+                    display_sold,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open Link"),
                         "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
@@ -232,16 +211,23 @@ if uploaded_file is not None:
             if not sold_df.empty:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
-                missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(15)
+                # Limit to 10
+                missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                
+                # Create display DF and fix index to start at 1
+                display_missed = missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                display_missed.index += 1
                 
                 st.dataframe(
-                    missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True),
+                    display_missed,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open Link"),
                         "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
                     },
                     use_container_width=True
                 )
+            else:
+                st.info("Data pending.")
 
         # --- EXPORT ---
         st.divider()
