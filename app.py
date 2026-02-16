@@ -5,13 +5,17 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import re
 import concurrent.futures
-import matplotlib.pyplot as plt
+import plotly.express as px  # New for interactive charts
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import datetime
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
+
+# --- SESSION STATE INITIALIZATION ---
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
 
 # --- LOGIN ---
 def check_password():
@@ -32,54 +36,32 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- THE VALUATION ENGINE (v3.0 - Model Specific) ---
+# --- THE VALUATION ENGINE ---
 
 def estimate_value(row):
-    """
-    Tiered Valuation Algorithm:
-    1. Checks for specific MODEL match (e.g. 'F-150' vs 'Focus').
-    2. Falls back to BRAND match if model not found.
-    3. Applies Age Depreciation.
-    """
+    """Tiered Valuation Algorithm (Internal Use Only)"""
     name = str(row['Vehicle Name']).lower()
     
-    # --- LEVEL 1: MODEL SPECIFIC BASELINES (2025/26 Avg MSRP) ---
+    # --- LEVEL 1: MODEL SPECIFIC BASELINES ---
     MODEL_PRICES = {
-        # FORD
-        'f-150': 60000, 'f 150': 60000, 'f150': 60000,
-        'f-250': 75000, 'f 250': 75000, 'super duty': 80000,
-        'ranger': 40000, 'maverick': 28000, 'bronco': 50000,
-        'explorer': 48000, 'expedition': 70000, 'edge': 40000,
-        'escape': 32000, 'mustang': 45000, 'mach-e': 55000,
-        'focus': 22000, 'fusion': 26000, 'fiesta': 18000, 'taurus': 28000,
-        
-        # CHEVROLET / GMC
-        'silverado': 55000, 'sierra': 62000, 'colorado': 38000, 'canyon': 42000,
+        'f-150': 60000, 'f 150': 60000, 'f150': 60000, 'super duty': 80000,
+        'ranger': 40000, 'maverick': 28000, 'bronco': 50000, 'explorer': 48000,
+        'expedition': 70000, 'edge': 40000, 'escape': 32000, 'mustang': 45000,
+        'mach-e': 55000, 'silverado': 55000, 'sierra': 62000, 'colorado': 38000,
         'tahoe': 72000, 'suburban': 78000, 'yukon': 78000, 'escalade': 110000,
         'corvette': 90000, 'camaro': 42000, 'blazer': 40000, 'equinox': 32000,
-        'traverse': 42000, 'malibu': 28000, 'trax': 24000, 'trailblazer': 28000,
-        'envision': 40000, 'enclave': 55000, 'encore': 28000,
-        
-        # JEEP / RAM / DODGE
-        'grand cherokee': 55000, 'wagoneer': 80000, 'wrangler': 48000,
-        'gladiator': 50000, 'ram 1500': 60000, 'ram 2500': 70000,
-        'durango': 50000, 'charger': 40000, 'challenger': 45000,
-        'pacifica': 45000, 'compass': 30000, 'renegade': 28000, 'hornet': 35000,
-        
-        # TOYOTA / HONDA
+        'traverse': 42000, 'malibu': 28000, 'grand cherokee': 55000, 'wagoneer': 80000,
+        'wrangler': 48000, 'gladiator': 50000, 'ram 1500': 60000, 'durango': 50000,
+        'charger': 40000, 'challenger': 45000, 'pacifica': 45000, 'compass': 30000,
         'tundra': 58000, 'tacoma': 42000, '4runner': 50000, 'sequoia': 75000,
-        'land cruiser': 85000, 'highlander': 45000, 'rav4': 35000, 'camry': 30000,
-        'corolla': 25000, 'prius': 32000, 'sienna': 48000,
-        'pilot': 48000, 'passport': 42000, 'cr-v': 36000, 'odyssey': 45000,
-        'civic': 28000, 'accord': 32000, 'ridgeline': 42000,
-        
-        # LUXURY / OTHER
+        'highlander': 45000, 'rav4': 35000, 'camry': 30000, 'corolla': 25000,
+        'prius': 32000, 'sienna': 48000, 'pilot': 48000, 'passport': 42000,
+        'cr-v': 36000, 'odyssey': 45000, 'civic': 28000, 'accord': 32000,
         '3 series': 50000, '5 series': 65000, 'x3': 55000, 'x5': 75000, 'x7': 90000,
-        'c-class': 52000, 'e-class': 70000, 'gle': 75000, 'gls': 95000, 'g-class': 160000,
+        'c-class': 52000, 'e-class': 70000, 'gle': 75000, 'gls': 95000,
         'rx': 58000, 'nx': 48000, 'es': 48000, 'gx': 70000, 'lx': 100000,
-        'gv80': 70000, 'gv70': 55000, 'g70': 45000,
-        'telluride': 48000, 'palisade': 50000, 'ioniq': 45000, 'ev6': 50000,
-        'lyriq': 65000, 'optiq': 54000, 'vistiq': 78000, 'ct4': 40000, 'ct5': 50000, 'xt4': 40000, 'xt5': 50000, 'xt6': 60000
+        'gv80': 70000, 'gv70': 55000, 'telluride': 48000, 'palisade': 50000,
+        'lyriq': 65000, 'optiq': 54000, 'ct4': 40000, 'ct5': 50000, 'xt4': 40000, 'xt5': 50000
     }
     
     # --- LEVEL 2: BRAND FALLBACKS ---
@@ -89,18 +71,14 @@ def estimate_value(row):
         'ford': 45000, 'chevrolet': 40000, 'gmc': 55000, 'ram': 55000,
         'jeep': 45000, 'dodge': 40000, 'toyota': 38000, 'honda': 35000,
         'nissan': 32000, 'hyundai': 30000, 'kia': 30000, 'subaru': 32000,
-        'volkswagen': 32000, 'mazda': 32000, 'volvo': 55000, 'acura': 50000
+        'volkswagen': 32000, 'mazda': 32000, 'volvo': 55000
     }
 
-    # 1. Determine Baseline Price
-    baseline = 35000 # Ultimate fallback
+    baseline = 35000
     found_model = False
     
-    # Sort models by length (longest first) to catch "Grand Cherokee" before "Cherokee"
     sorted_models = sorted(MODEL_PRICES.keys(), key=len, reverse=True)
-    
     for model in sorted_models:
-        # Use word boundaries to avoid partial matches (e.g. 'es' in 'Series')
         if re.search(r'\b' + re.escape(model) + r'\b', name):
             baseline = MODEL_PRICES[model]
             found_model = True
@@ -112,17 +90,14 @@ def estimate_value(row):
                 baseline = price
                 break
 
-    # 2. Extract Year & Apply Depreciation
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
-    
-    current_year = datetime.datetime.now().year + 1 # Assume 2026 market context
+    current_year = datetime.datetime.now().year + 1
     age = current_year - year
     
     if age <= 0:
         value = baseline
     else:
-        # Curve: -15% Yr 1, -10% Yrs 2+
         value = baseline * 0.85
         for _ in range(age - 1):
             value = value * 0.90
@@ -198,18 +173,19 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v2.2")
+st.title("🚗 Auto-Sales Intelligence Agent v3.0")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
-    df_raw = pd.read_csv(uploaded_file)
-    
+    # --- PROCESSING LOGIC ---
     if st.button("🚀 Run Diagnostic Analysis"):
+        df_raw = pd.read_csv(uploaded_file)
+        
         # 1. Pre-process
         df_raw['Category'] = df_raw['Page Url'].apply(categorize)
         vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
         
-        st.info(f"Scanning {len(vdp_urls)} Vehicles. Applying AI Valuation...")
+        st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
         progress_bar = st.progress(0)
         
         # 2. Session
@@ -228,19 +204,23 @@ if uploaded_file is not None:
                 vdp_results[url] = future.result()
                 progress_bar.progress((i + 1) / len(vdp_urls))
 
-        # 4. Process Data
+        # 4. Process & Save to Session State
         df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
         df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
-        
-        # 5. Apply Model-Specific Valuation
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
-        # --- METRICS ---
+        st.session_state.processed_data = df
+        st.rerun() # Force reload to show results
+
+    # --- DISPLAY LOGIC (FROM SESSION STATE) ---
+    if st.session_state.processed_data is not None:
+        df = st.session_state.processed_data
+        
         sold_df = df[df['Is Sold']]
         vdp_df = df[df['Category'] == 'VDP']
         
@@ -256,25 +236,36 @@ if uploaded_file is not None:
 
         st.divider()
         
-        # --- CHARTS ---
+        # --- INTERACTIVE CHARTS ---
         c1, c2, c3 = st.columns(3)
+        
         with c1:
             st.markdown("**Traffic Mix**")
-            st.bar_chart(df.groupby('Category')['Attributed Unique Visitors'].sum())
+            traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index()
+            fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
+            st.plotly_chart(fig1, use_container_width=True)
+            
         with c2:
             st.markdown("**Sales Mix (New vs Used)**")
             if not sold_df.empty:
-                fig, ax = plt.subplots()
-                sold_df['Type'].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, colors=['#4F81BD', '#C0504D'])
-                ax.set_ylabel('')
-                st.pyplot(fig)
+                type_counts = sold_df['Type'].value_counts().reset_index()
+                type_counts.columns = ['Type', 'Count']
+                fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', 
+                             color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'},
+                             hover_data=['Count']) # Shows Count on Hover
+                fig2.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig2, use_container_width=True)
+                
         with c3:
             st.markdown("**Sold Value Tiers**")
             if not sold_df.empty:
-                fig, ax = plt.subplots()
-                sold_df['Price Tier'].value_counts().plot.pie(autopct='%1.1f%%', ax=ax, colors=['#9BBB59', '#4F81BD', '#8064A2'])
-                ax.set_ylabel('')
-                st.pyplot(fig)
+                tier_counts = sold_df['Price Tier'].value_counts().reset_index()
+                tier_counts.columns = ['Price Tier', 'Count']
+                fig3 = px.pie(tier_counts, values='Count', names='Price Tier', 
+                             color_discrete_sequence=px.colors.qualitative.Set2,
+                             hover_data=['Count'])
+                fig3.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig3, use_container_width=True)
 
         # --- TABLES ---
         t1, t2 = st.columns(2)
@@ -283,13 +274,13 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                display_sold = top_sold[['Vehicle Name', 'Type', 'Est. Value', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                # Removed 'Est. Value' from display
+                display_sold = top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
                     display_sold,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
-                        "Est. Value": st.column_config.NumberColumn("Est. Price", format="$%d"),
                         "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
                     }, use_container_width=True
                 )
@@ -302,13 +293,13 @@ if uploaded_file is not None:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)]
                 missed = missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                display_missed = missed[['Vehicle Name', 'Type', 'Est. Value', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                # Removed 'Est. Value' from display
+                display_missed = missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
                     display_missed,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
-                        "Est. Value": st.column_config.NumberColumn("Est. Price", format="$%d"),
                         "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
                     }, use_container_width=True
                 )
@@ -319,10 +310,13 @@ if uploaded_file is not None:
         st.divider()
         ex1, ex2 = st.columns(2)
         with ex1:
+            # Simplified Sold Report (Requested Columns Only)
+            simple_sold = sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']]
             st.download_button("📥 Download Sold Report (CSV)", 
-                               sold_df.to_csv(index=False), 
+                               simple_sold.to_csv(index=False), 
                                "Sold_Vehicles_Report.csv", "text/csv")
         with ex2:
+            # Full Report (All Data)
             st.download_button("📥 Download Full Analysis (CSV)", 
                                df.to_csv(index=False), 
                                "Full_Market_Analysis.csv", "text/csv")
