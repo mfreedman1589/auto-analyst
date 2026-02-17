@@ -11,13 +11,12 @@ from bs4 import BeautifulSoup
 import datetime
 from fpdf import FPDF
 import io
-import tempfile # Needed for chart images
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION ---
-def create_pdf_report(df, sold_df, metrics, traffic_fig, sales_fig, tier_fig, missed_df, include_missed):
+# --- PDF GENERATOR FUNCTION (Text-Based Visuals) ---
+def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
     
@@ -35,7 +34,6 @@ def create_pdf_report(df, sold_df, metrics, traffic_fig, sales_fig, tier_fig, mi
     pdf.set_font("Arial", "", 12)
     pdf.ln(5)
     
-    # KPI Grid
     col_width = pdf.w / 2.2
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
@@ -43,20 +41,71 @@ def create_pdf_report(df, sold_df, metrics, traffic_fig, sales_fig, tier_fig, mi
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     pdf.ln(10)
 
-    # 3. Visual Insights (Charts)
+    # 3. Market Insights (The "Charts" as Tables)
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, " 2. Visual Insights", ln=True, fill=True)
+    pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
-    # Save charts as temporary images
-    with tempfile.NamedTemporaryFile(suffix=".png") as tmpfile1:
-        traffic_fig.write_image(tmpfile1.name)
-        pdf.image(tmpfile1.name, x=10, y=None, w=90)
+    # Traffic Mix Table
+    pdf.set_font("Arial", "B", 11)
+    pdf.cell(0, 8, "Traffic Mix (Where visitors landed)", ln=True)
+    pdf.set_font("Arial", "B", 9)
+    pdf.cell(100, 8, "Page Category", border=1)
+    pdf.cell(40, 8, "Visitors", border=1)
+    pdf.ln()
+    pdf.set_font("Arial", "", 9)
+    traffic_mix = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
+    for _, row in traffic_mix.iterrows():
+        pdf.cell(100, 8, str(row['Category']), border=1)
+        pdf.cell(40, 8, str(row['Attributed Unique Visitors']), border=1)
+        pdf.ln()
+    pdf.ln(5)
+
+    # Sales Mix Table
+    if not sold_df.empty:
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
+        pdf.set_font("Arial", "B", 9)
+        pdf.cell(70, 8, "Type", border=1)
+        pdf.cell(35, 8, "Sold Count", border=1)
+        pdf.cell(35, 8, "Share %", border=1)
+        pdf.ln()
+        pdf.set_font("Arial", "", 9)
+        sales_mix = sold_df['Type'].value_counts(normalize=True).mul(100).round(1).reset_index()
+        sales_mix.columns = ['Type', 'Share']
+        sales_counts = sold_df['Type'].value_counts().reset_index()
+        sales_counts.columns = ['Type', 'Count']
+        merged_sales = pd.merge(sales_mix, sales_counts, on='Type')
         
-    with tempfile.NamedTemporaryFile(suffix=".png") as tmpfile2:
-        sales_fig.write_image(tmpfile2.name)
-        pdf.image(tmpfile2.name, x=110, y=pdf.get_y() - 60, w=90) # Place next to previous chart
+        for _, row in merged_sales.iterrows():
+            pdf.cell(70, 8, str(row['Type']), border=1)
+            pdf.cell(35, 8, str(row['Count']), border=1)
+            pdf.cell(35, 8, f"{row['Share']}%", border=1)
+            pdf.ln()
+        pdf.ln(5)
+
+    # Price Tier Table
+    if not sold_df.empty:
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
+        pdf.set_font("Arial", "B", 9)
+        pdf.cell(70, 8, "Price Tier", border=1)
+        pdf.cell(35, 8, "Sold Count", border=1)
+        pdf.cell(35, 8, "Share %", border=1)
+        pdf.ln()
+        pdf.set_font("Arial", "", 9)
+        tier_mix = sold_df['Price Tier'].value_counts(normalize=True).mul(100).round(1).reset_index()
+        tier_mix.columns = ['Price Tier', 'Share']
+        tier_counts = sold_df['Price Tier'].value_counts().reset_index()
+        tier_counts.columns = ['Price Tier', 'Count']
+        merged_tiers = pd.merge(tier_mix, tier_counts, on='Price Tier')
         
+        for _, row in merged_tiers.iterrows():
+            pdf.cell(70, 8, str(row['Price Tier']), border=1)
+            pdf.cell(35, 8, str(row['Count']), border=1)
+            pdf.cell(35, 8, f"{row['Share']}%", border=1)
+            pdf.ln()
+    
     pdf.ln(10)
 
     # 4. Top Sold Units
@@ -66,10 +115,10 @@ def create_pdf_report(df, sold_df, metrics, traffic_fig, sales_fig, tier_fig, mi
     
     # Header
     pdf.set_font("Arial", "B", 10)
-    pdf.cell(85, 8, "Vehicle Name", border=1)
+    pdf.cell(80, 8, "Vehicle Name", border=1)
     pdf.cell(30, 8, "Type", border=1)
     pdf.cell(25, 8, "Visitors", border=1)
-    pdf.cell(50, 8, "VIN", border=1)
+    pdf.cell(55, 8, "VIN", border=1)
     pdf.ln()
 
     # Rows
@@ -77,51 +126,48 @@ def create_pdf_report(df, sold_df, metrics, traffic_fig, sales_fig, tier_fig, mi
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         for _, row in top_sold.iterrows():
-            name = str(row['Vehicle Name'])[:38]
-            pdf.cell(85, 8, name, border=1)
+            name = str(row['Vehicle Name'])[:35]
+            pdf.cell(80, 8, name, border=1)
             pdf.cell(30, 8, str(row['Type']), border=1)
             pdf.cell(25, 8, str(row['Attributed Unique Visitors']), border=1)
-            pdf.cell(50, 8, str(row['VIN'])[-10:], border=1)
+            pdf.cell(55, 8, str(row['VIN']), border=1)
             pdf.ln()
     else:
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 5. Missed Opportunities (Optional)
+    # 5. Missed Opportunities (Optional Toggle)
     if include_missed:
-        pdf.add_page() # Start fresh page
+        pdf.add_page()
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, " 4. Missed Opportunities (The Watch List)", ln=True, fill=True)
         pdf.set_font("Arial", "I", 10)
-        pdf.cell(0, 10, "Active vehicles with high traffic but no sale. Click name to view.", ln=True)
+        pdf.cell(0, 10, "High traffic vehicles that have not sold. Click Name to view.", ln=True)
         pdf.ln(2)
         
         # Header
         pdf.set_font("Arial", "B", 10)
-        pdf.cell(90, 8, "Vehicle Name (Click to View)", border=1)
-        pdf.cell(30, 8, "Type", border=1)
+        pdf.cell(90, 8, "Vehicle Name (Clickable)", border=1)
+        pdf.cell(25, 8, "Type", border=1)
         pdf.cell(25, 8, "Visitors", border=1)
-        pdf.cell(45, 8, "Est. Value", border=1)
+        pdf.cell(50, 8, "Est. Value", border=1)
         pdf.ln()
         
         # Rows
         pdf.set_font("Arial", "", 9)
-        pdf.set_text_color(0, 0, 255) # Blue text for links
         if not missed_df.empty:
              for _, row in missed_df.iterrows():
                 name = str(row['Vehicle Name'])[:40]
                 url = str(row['Page Url'])
                 
-                # Cell with Link
+                # Blue Text for Link
+                pdf.set_text_color(0, 0, 255) 
                 pdf.cell(90, 8, name, border=1, link=url)
                 
-                # Reset color for other cells
+                # Black Text for Data
                 pdf.set_text_color(0, 0, 0) 
-                pdf.cell(30, 8, str(row['Type']), border=1)
+                pdf.cell(25, 8, str(row['Type']), border=1)
                 pdf.cell(25, 8, str(row['Attributed Unique Visitors']), border=1)
-                pdf.cell(45, 8, f"${row['Est. Value']:,.0f}", border=1)
-                
-                # Reset color back to blue for next loop (just in case)
-                pdf.set_text_color(0, 0, 255)
+                pdf.cell(50, 8, f"${row['Est. Value']:,.0f}", border=1)
                 pdf.ln()
     
     return bytes(pdf.output())
@@ -269,7 +315,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.0")
+st.title("🚗 Auto-Sales Intelligence Agent v4.2")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -323,7 +369,6 @@ if uploaded_file is not None:
 
         st.divider()
         
-        # Charts (Store them in variables for PDF export)
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("**Traffic Mix**")
@@ -336,7 +381,7 @@ if uploaded_file is not None:
                 type_counts = sold_df['Type'].value_counts().reset_index()
                 type_counts.columns = ['Type', 'Count']
                 fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', 
-                             color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'})
+                             color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'}, hover_data=['Count'])
                 fig2.update_traces(textposition='inside', textinfo='percent+label')
                 st.plotly_chart(fig2, use_container_width=True)
         with c3:
@@ -345,7 +390,7 @@ if uploaded_file is not None:
                 tier_counts = sold_df['Price Tier'].value_counts().reset_index()
                 tier_counts.columns = ['Price Tier', 'Count']
                 fig3 = px.pie(tier_counts, values='Count', names='Price Tier', 
-                             color_discrete_sequence=px.colors.qualitative.Set2)
+                             color_discrete_sequence=px.colors.qualitative.Set2, hover_data=['Count'])
                 fig3.update_traces(textposition='inside', textinfo='percent+label')
                 st.plotly_chart(fig3, use_container_width=True)
 
@@ -354,13 +399,34 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                st.dataframe(top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True), use_container_width=True)
+                display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                display_sold.index += 1
+                st.dataframe(
+                    display_sold,
+                    column_config={
+                        "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
+                    },
+                    use_container_width=True
+                )
+            else:
+                st.info("No sales identified.")
+
         with t2:
             st.subheader("⚠️ Missed Opportunities")
             if not sold_df.empty:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed_df = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                st.dataframe(missed_df[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True), use_container_width=True)
+                display_missed = missed_df[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                display_missed.index += 1
+                st.dataframe(
+                    display_missed,
+                    column_config={
+                        "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
+                    },
+                    use_container_width=True
+                )
             else:
                 missed_df = pd.DataFrame()
 
@@ -374,8 +440,7 @@ if uploaded_file is not None:
         with ex1:
             # Generate PDF Button
             metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}"}
-            # Pass charts and missed_df to the function
-            pdf_data = create_pdf_report(df, sold_df, metrics_bundle, fig1, fig2, fig3, missed_df, include_missed_in_pdf)
+            pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
             st.download_button("📥 Download PDF Summary", data=pdf_data, file_name="Sales_Intelligence_Summary.pdf", mime="application/pdf")
         with ex2:
             st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), "Sold_Report.csv", "text/csv")
