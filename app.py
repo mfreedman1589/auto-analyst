@@ -15,7 +15,7 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION (Text-Based Visuals) ---
+# --- PDF GENERATOR FUNCTION (Polished Layout) ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
@@ -41,7 +41,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     pdf.ln(10)
 
-    # 3. Market Insights (The "Charts" as Tables)
+    # 3. Market Insights (Tables)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
@@ -108,34 +108,40 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     pdf.ln(10)
 
-    # 4. Top Sold Units
+    # 4. Top Sold Units (Widths Optimized)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 3. Top Sold Units", ln=True, fill=True)
     pdf.ln(5)
     
-    # Header
+    # Header - Adjusted widths: Less for Type/Visitors, More for VIN
     pdf.set_font("Arial", "B", 10)
     pdf.cell(80, 8, "Vehicle Name", border=1)
-    pdf.cell(30, 8, "Type", border=1)
-    pdf.cell(25, 8, "Visitors", border=1)
-    pdf.cell(55, 8, "VIN", border=1)
+    pdf.cell(25, 8, "Type", border=1)
+    pdf.cell(20, 8, "Visits", border=1)
+    pdf.cell(65, 8, "VIN", border=1) # Expanded width
     pdf.ln()
 
     # Rows
-    pdf.set_font("Arial", "", 9)
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         for _, row in top_sold.iterrows():
             name = str(row['Vehicle Name'])[:35]
+            
+            # Standard Font
+            pdf.set_font("Arial", "", 9) 
             pdf.cell(80, 8, name, border=1)
-            pdf.cell(30, 8, str(row['Type']), border=1)
-            pdf.cell(25, 8, str(row['Attributed Unique Visitors']), border=1)
-            pdf.cell(55, 8, str(row['VIN']), border=1)
+            pdf.cell(25, 8, str(row['Type']), border=1)
+            pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
+            
+            # Smaller Font for VIN
+            pdf.set_font("Arial", "", 8) 
+            pdf.cell(65, 8, str(row['VIN']), border=1)
             pdf.ln()
     else:
+        pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 5. Missed Opportunities (Optional Toggle)
+    # 5. Missed Opportunities (Widths Optimized)
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
@@ -144,30 +150,36 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.cell(0, 10, "High traffic vehicles that have not sold. Click Name to view.", ln=True)
         pdf.ln(2)
         
-        # Header
+        # Header - Adjusted widths to give VIN room
         pdf.set_font("Arial", "B", 10)
-        pdf.cell(90, 8, "Vehicle Name (Clickable)", border=1)
-        pdf.cell(25, 8, "Type", border=1)
-        pdf.cell(25, 8, "Visitors", border=1)
-        pdf.cell(50, 8, "Est. Value", border=1)
+        pdf.cell(65, 8, "Vehicle Name (Clickable)", border=1)
+        pdf.cell(55, 8, "VIN", border=1) # Expanded width
+        pdf.cell(15, 8, "Type", border=1)
+        pdf.cell(15, 8, "Visits", border=1)
+        pdf.cell(40, 8, "Est. Value", border=1)
         pdf.ln()
         
         # Rows
-        pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
              for _, row in missed_df.iterrows():
-                name = str(row['Vehicle Name'])[:40]
+                name = str(row['Vehicle Name'])[:30]
                 url = str(row['Page Url'])
                 
-                # Blue Text for Link
+                # Link (Standard Font, Blue)
+                pdf.set_font("Arial", "", 9)
                 pdf.set_text_color(0, 0, 255) 
-                pdf.cell(90, 8, name, border=1, link=url)
+                pdf.cell(65, 8, name, border=1, link=url)
                 
-                # Black Text for Data
-                pdf.set_text_color(0, 0, 0) 
-                pdf.cell(25, 8, str(row['Type']), border=1)
-                pdf.cell(25, 8, str(row['Attributed Unique Visitors']), border=1)
-                pdf.cell(50, 8, f"${row['Est. Value']:,.0f}", border=1)
+                # VIN (Smaller Font, Black)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font("Arial", "", 8) 
+                pdf.cell(55, 8, str(row['VIN']), border=1)
+                
+                # Rest (Standard Font, Black)
+                pdf.set_font("Arial", "", 9)
+                pdf.cell(15, 8, str(row['Type']), border=1)
+                pdf.cell(15, 8, str(row['Attributed Unique Visitors']), border=1)
+                pdf.cell(40, 8, f"${row['Est. Value']:,.0f}", border=1)
                 pdf.ln()
     
     return bytes(pdf.output())
@@ -315,7 +327,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.2")
+st.title("🚗 Auto-Sales Intelligence Agent v4.4")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -399,6 +411,7 @@ if uploaded_file is not None:
             st.subheader("🏆 Top Sold Units")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                # Restored VIN and formatting
                 display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
@@ -417,7 +430,8 @@ if uploaded_file is not None:
             if not sold_df.empty:
                 avg_v = sold_df['Attributed Unique Visitors'].mean()
                 missed_df = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                display_missed = missed_df[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+                # ADDED VIN HERE
+                display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
                     display_missed,
@@ -433,12 +447,10 @@ if uploaded_file is not None:
         st.divider()
         st.markdown("### 📥 Export Reports")
         
-        # PDF Option Toggle
         include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF Report?", value=True)
         
         ex1, ex2, ex3 = st.columns(3)
         with ex1:
-            # Generate PDF Button
             metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}"}
             pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
             st.download_button("📥 Download PDF Summary", data=pdf_data, file_name="Sales_Intelligence_Summary.pdf", mime="application/pdf")
