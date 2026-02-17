@@ -171,4 +171,182 @@ def clean_name_universal(url):
     path = urlparse(url).path.lower()
     brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi', 'Cadillac', 'Buick', 'Acura', 'Infiniti', 'Lincoln', 'Land Rover', 'Jaguar', 'Porsche', 'Mini']
     make = ""
-    for b in brands
+    for b in brands:
+        if b.lower() in path:
+            make = b
+            break
+    rest = url.split(year)[-1].replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
+    tokens = rest.split()
+    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers']
+    clean_tokens = [t for t in tokens if not (len(t) > 10 and any(c.isdigit() for c in t)) and t.title() not in junk and t.title() != make]
+    return f"{year} {make} {' '.join(clean_tokens)}".title().strip()
+
+def categorize(u):
+    u = str(u).lower()
+    if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
+    if any(x in u for x in ['search', 'inventory']):
+        if 'new' in u: return 'New Car Search'
+        if 'used' in u or 'preowned' in u: return 'Used Car Search'
+        return 'General Search'
+    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+    if get_year(u): return 'VDP'
+    return 'Other'
+
+def check_universal_status(url, session):
+    year = get_year(url)
+    if not year: return "N/A"
+    try:
+        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
+        final_url = response.url.lower()
+        search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
+        if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
+            response.close()
+            return "SOLD (Hard Redirect)"
+        text = response.text 
+        soup = BeautifulSoup(text, 'html.parser')
+        page_title = soup.title.string.strip().lower() if soup.title else ""
+        if year not in page_title and len(page_title) > 5:
+            return "SOLD (Soft Redirect)"
+        return "Available"
+    except:
+        return "Available"
+
+# --- UI DASHBOARD ---
+st.title("🚗 Auto-Sales Intelligence Agent v3.9")
+uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
+
+if uploaded_file is not None:
+    if st.button("🚀 Run Diagnostic Analysis"):
+        df_raw = pd.read_csv(uploaded_file)
+        df_raw['Category'] = df_raw['Page Url'].apply(categorize)
+        vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
+        st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
+        progress_bar = st.progress(0)
+        session = requests.Session()
+        retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
+        vdp_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+                url = future_to_url[future]
+                vdp_results[url] = future.result()
+                progress_bar.progress((i + 1) / len(vdp_urls))
+        df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
+        df = df_raw.copy()
+        df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
+        df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
+        df['VIN'] = df['Page Url'].apply(extract_vin)
+        df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+        df['Est. Value'] = df.apply(estimate_value, axis=1)
+        df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
+        st.session_state.processed_data = df
+        st.rerun()
+
+    if st.session_state.processed_data is not None:
+        df = st.session_state.processed_data
+        sold_df = df[df['Is Sold']]
+        vdp_df = df[df['Category'] == 'VDP']
+        
+        # Prepare metrics for PDF
+        m_units = len(sold_df)
+        m_rev = sold_df['Est. Value'].sum()
+        m_pipe = vdp_df['Est. Value'].sum()
+        m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
+        
+        st.markdown("### 📊 Executive Summary")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Units Sold", m_units)
+        m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
+        m3.metric("Pipeline Value (Active)", f"${m_pipe:,.0f}")
+        m4.metric("Look-to-Book", f"{m_ltb:.1f}%")
+
+        st.divider()
+        
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Traffic Mix**")
+            traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index()
+            fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
+            st.plotly_chart(fig1, use_container_width=True)
+        with c2:
+            st.markdown("**Sales Mix (New vs Used)**")
+            if not sold_df.empty:
+                type_counts = sold_df['Type'].value_counts().reset_index()
+                type_counts.columns = ['Type', 'Count']
+                fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', 
+                             color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'}, hover_data=['Count'])
+                fig2.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig2, use_container_width=True)
+        with c3:
+            st.markdown("**Sold Value Tiers**")
+            if not sold_df.empty:
+                tier_counts = sold_df['Price Tier'].value_counts().reset_index()
+                tier_counts.columns = ['Price Tier', 'Count']
+                fig3 = px.pie(tier_counts, values='Count', names='Price Tier', 
+                             color_discrete_sequence=px.colors.qualitative.Set2, hover_data=['Count'])
+                fig3.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig3, use_container_width=True)
+
+        t1, t2 = st.columns(2)
+        with t1:
+            st.subheader("🏆 Top Sold Units")
+            if not sold_df.empty:
+                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                st.dataframe(top_sold[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True), use_container_width=True)
+        with t2:
+            st.subheader("⚠️ Missed Opportunities")
+            if not sold_df.empty:
+                avg_v = sold_df['Attributed Unique Visitors'].mean()
+                missed = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                st.dataframe(missed[['Vehicle Name', 'Type', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True), use_container_width=True)
+
+        st.divider()
+        st.markdown("### 📥 Export Reports")
+        ex1, ex2, ex3 = st.columns(3)
+        with ex1:
+            # --- PDF DOWNLOAD ---
+            metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}"}
+            pdf_data = create_pdf_report(df, sold_df, metrics_bundle)
+            st.download_button("📥 Download PDF Summary", data=pdf_data, file_name="Sales_Intelligence_Summary.pdf", mime="application/pdf")
+        with ex2:
+            st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), "Sold_Report.csv", "text/csv")
+        with ex3:
+            st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), "Full_Market_Analysis.csv", "text/csv")
+
+        st.divider()
+        with st.expander("ℹ️ Glossary & Guide: How to read this report"):
+            st.markdown("""
+            ### **Definitions & Insights**
+            
+            **1. Units Sold**
+            The total count of vehicles that were identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site was actively shopping for cars that moved off the lot.
+            
+            **2. Estimated Value (Rev & Pipeline)**
+            A data-driven approximation of the inventory's dollar value. 
+            * **New Cars:** Calculated using 2025/2026 Base MSRP for the specific model.
+            * **Used Cars:** Calculated using the base MSRP depreciated by age (-15% Yr 1, -10% Yrs 2+).
+            * *Note: This is a directional estimate to gauge "Total Pipeline Power" and does not account for specific trim levels, options, or dealer markups.*
+            
+            **3. Look-to-Book Ratio**
+            The efficiency metric of your inventory. It measures the conversion velocity of the cars we drove traffic to.
+            * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
+            * *Insight:* A higher percentage (20%+) indicates high-quality traffic meeting "Market Correct" inventory. A lower percentage suggests plenty of shoppers, but hesitation to buy (pricing/merchandising issues).
+            
+            **4. Top Sold Units**
+            The specific "Sold" vehicles that received the highest volume of exposure from our traffic. This highlights the specific models where our audience demand matched your sales success.
+            
+            **5. Missed Opportunities**
+            **"The Watch List."** These are active vehicles receiving **above-average traffic** but haven't sold yet. 
+            * *Why this matters:* You are paying for popularity, but not getting the sale. 
+            * *Action Item:* Audit these VDPs immediately. Check for **missing photos**, **"Call for Price" buttons** (which lower conversion), or **pricing outliers**. These units are "High Interest" and likely just need a small nudge to sell.
+            
+            **6. Traffic Mix**
+            A breakdown of where our audience lands and navigates.
+            * **VDP (Vehicle Detail Page):** The "Money Page." High VDP traffic proves the audience is "Deep Funnel"—shopping for specific VINs rather than just browsing.
+            * **Service/Parts:** Captures fixed-ops intent.
+            * **New vs. Used:** Helps align your marketing spend with actual inventory interest.
+            """)
