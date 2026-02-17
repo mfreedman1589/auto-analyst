@@ -3,5 +3,5 @@ pandas
 requests
 beautifulsoup4
 plotly
-lxml
 fpdf2
+kaleido
