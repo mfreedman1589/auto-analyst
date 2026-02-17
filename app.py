@@ -15,7 +15,7 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION (Polished Layout) ---
+# --- PDF GENERATOR FUNCTION (v4.6) ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
@@ -41,7 +41,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     pdf.ln(10)
 
-    # 3. Market Insights (Tables)
+    # 3. Market Insights (Traffic/Sales Mix)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
@@ -108,78 +108,117 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     pdf.ln(10)
 
-    # 4. Top Sold Units (Widths Optimized)
+    # 4. Top Sold Models (Aggregated)
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, " 3. Top Sold Units", ln=True, fill=True)
+    pdf.cell(0, 10, " 3. Top Sold Models (Aggregated)", ln=True, fill=True)
     pdf.ln(5)
+
+    if not sold_df.empty:
+        sold_models = sold_df.copy()
+        sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+        top_models = sold_models['Model_Only'].value_counts().head(10).reset_index()
+        top_models.columns = ['Make/Model', 'Units Sold']
+        
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(100, 8, "Make/Model", border=1)
+        pdf.cell(40, 8, "Units Sold", border=1)
+        pdf.ln()
+        
+        pdf.set_font("Arial", "", 9)
+        for _, row in top_models.iterrows():
+            pdf.cell(100, 8, str(row['Make/Model']), border=1)
+            pdf.cell(40, 8, str(row['Units Sold']), border=1)
+            pdf.ln()
+    else:
+        pdf.set_font("Arial", "", 9)
+        pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
     
-    # Header - Adjusted widths: Less for Type/Visitors, More for VIN
+    pdf.ln(5)
+
+    # 5. Top Sold Units (Detailed List)
+    pdf.set_font("Arial", "B", 11)
+    pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
+    
     pdf.set_font("Arial", "B", 10)
     pdf.cell(80, 8, "Vehicle Name", border=1)
     pdf.cell(25, 8, "Type", border=1)
     pdf.cell(20, 8, "Visits", border=1)
-    pdf.cell(65, 8, "VIN", border=1) # Expanded width
+    pdf.cell(65, 8, "VIN", border=1)
     pdf.ln()
 
-    # Rows
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         for _, row in top_sold.iterrows():
             name = str(row['Vehicle Name'])[:35]
             
-            # Standard Font
             pdf.set_font("Arial", "", 9) 
             pdf.cell(80, 8, name, border=1)
             pdf.cell(25, 8, str(row['Type']), border=1)
             pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
             
-            # Smaller Font for VIN
-            pdf.set_font("Arial", "", 8) 
+            pdf.set_font("Arial", "", 8) # Smaller for VIN
             pdf.cell(65, 8, str(row['VIN']), border=1)
             pdf.ln()
     else:
         pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 5. Missed Opportunities (Widths Optimized)
+    # 6. Missed Opportunities
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, " 4. Missed Opportunities (The Watch List)", ln=True, fill=True)
-        pdf.set_font("Arial", "I", 10)
-        pdf.cell(0, 10, "High traffic vehicles that have not sold. Click Name to view.", ln=True)
-        pdf.ln(2)
+        pdf.ln(5)
         
-        # Header - Adjusted widths to give VIN room
+        # Aggregated Missed Models
+        if not missed_df.empty:
+            pdf.set_font("Arial", "B", 11)
+            pdf.cell(0, 10, "Top Missed Models (Aggregated)", ln=True)
+            
+            missed_models = missed_df.copy()
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            top_missed = missed_models['Model_Only'].value_counts().head(10).reset_index()
+            top_missed.columns = ['Make/Model', 'Count']
+            
+            pdf.set_font("Arial", "B", 10)
+            pdf.cell(100, 8, "Make/Model", border=1)
+            pdf.cell(40, 8, "Missed Count", border=1)
+            pdf.ln()
+            
+            pdf.set_font("Arial", "", 9)
+            for _, row in top_missed.iterrows():
+                pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                pdf.cell(40, 8, str(row['Count']), border=1)
+                pdf.ln()
+            pdf.ln(5)
+        
+        # Detailed Missed List (No Est Value, optimized VIN)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
+        
         pdf.set_font("Arial", "B", 10)
-        pdf.cell(65, 8, "Vehicle Name (Clickable)", border=1)
-        pdf.cell(55, 8, "VIN", border=1) # Expanded width
-        pdf.cell(15, 8, "Type", border=1)
-        pdf.cell(15, 8, "Visits", border=1)
-        pdf.cell(40, 8, "Est. Value", border=1)
+        pdf.cell(85, 8, "Vehicle Name (Clickable)", border=1)
+        pdf.cell(65, 8, "VIN", border=1)
+        pdf.cell(20, 8, "Type", border=1)
+        pdf.cell(20, 8, "Visits", border=1)
         pdf.ln()
         
-        # Rows
+        pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
              for _, row in missed_df.iterrows():
-                name = str(row['Vehicle Name'])[:30]
+                name = str(row['Vehicle Name'])[:35]
                 url = str(row['Page Url'])
                 
-                # Link (Standard Font, Blue)
-                pdf.set_font("Arial", "", 9)
                 pdf.set_text_color(0, 0, 255) 
-                pdf.cell(65, 8, name, border=1, link=url)
+                pdf.cell(85, 8, name, border=1, link=url)
                 
-                # VIN (Smaller Font, Black)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 8) 
-                pdf.cell(55, 8, str(row['VIN']), border=1)
+                pdf.set_font("Arial", "", 8) # Small VIN
+                pdf.cell(65, 8, str(row['VIN']), border=1)
                 
-                # Rest (Standard Font, Black)
                 pdf.set_font("Arial", "", 9)
-                pdf.cell(15, 8, str(row['Type']), border=1)
-                pdf.cell(15, 8, str(row['Attributed Unique Visitors']), border=1)
-                pdf.cell(40, 8, f"${row['Est. Value']:,.0f}", border=1)
+                pdf.cell(20, 8, str(row['Type']), border=1)
+                pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                 pdf.ln()
     
     return bytes(pdf.output())
@@ -327,7 +366,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.4")
+st.title("🚗 Auto-Sales Intelligence Agent v4.6")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -372,6 +411,13 @@ if uploaded_file is not None:
         m_pipe = vdp_df['Est. Value'].sum()
         m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
         
+        # Calculate Top 10 Missed Ops EARLY (needed for both dashboard and PDF)
+        if not sold_df.empty:
+            avg_v = sold_df['Attributed Unique Visitors'].mean()
+            missed_df = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        else:
+            missed_df = pd.DataFrame()
+
         st.markdown("### 📊 Executive Summary")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Units Sold", m_units)
@@ -408,10 +454,19 @@ if uploaded_file is not None:
 
         t1, t2 = st.columns(2)
         with t1:
-            st.subheader("🏆 Top Sold Units")
+            # AGGREGATED SOLD TABLE
+            if not sold_df.empty:
+                st.subheader("🏆 Top Sold Models (Aggregated)")
+                sold_models = sold_df.copy()
+                sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                top_models = sold_models['Model_Only'].value_counts().head(10).reset_index()
+                top_models.columns = ['Make/Model', 'Units Sold']
+                st.dataframe(top_models, use_container_width=True, hide_index=True)
+                st.divider()
+
+            st.subheader("Top Sold Units (Detail)")
             if not sold_df.empty:
                 top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # Restored VIN and formatting
                 display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_sold.index += 1
                 st.dataframe(
@@ -426,11 +481,18 @@ if uploaded_file is not None:
                 st.info("No sales identified.")
 
         with t2:
-            st.subheader("⚠️ Missed Opportunities")
-            if not sold_df.empty:
-                avg_v = sold_df['Attributed Unique Visitors'].mean()
-                missed_df = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                # ADDED VIN HERE
+            # AGGREGATED MISSED TABLE
+            if not missed_df.empty:
+                st.subheader("⚠️ Top Missed Models (Aggregated)")
+                missed_models = missed_df.copy()
+                missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                top_missed = missed_models['Model_Only'].value_counts().head(10).reset_index()
+                top_missed.columns = ['Make/Model', 'Missed Count']
+                st.dataframe(top_missed, use_container_width=True, hide_index=True)
+                st.divider()
+
+            st.subheader("Missed Opportunities (Detail)")
+            if not missed_df.empty:
                 display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
                 display_missed.index += 1
                 st.dataframe(
@@ -442,7 +504,7 @@ if uploaded_file is not None:
                     use_container_width=True
                 )
             else:
-                missed_df = pd.DataFrame()
+                st.info("No missed opportunities identified.")
 
         st.divider()
         st.markdown("### 📥 Export Reports")
