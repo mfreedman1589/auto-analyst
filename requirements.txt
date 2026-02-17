@@ -4,4 +4,3 @@ requests
 beautifulsoup4
 plotly
 fpdf2
-kaleido
