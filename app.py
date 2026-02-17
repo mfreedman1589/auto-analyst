@@ -15,7 +15,7 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION (v4.7) ---
+# --- PDF GENERATOR FUNCTION (v4.9) ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
@@ -35,11 +35,21 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.ln(5)
     
     col_width = pdf.w / 2.2
+    
+    # Row 1
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
+    
+    # Row 2 (Pipeline & LTB)
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
-    pdf.ln(10)
+    
+    # Row 3 (LTB Sub-detail) - Small & Italic, aligned under LTB
+    pdf.set_font("Arial", "I", 10)
+    pdf.cell(col_width, 6, "", border=0) # Empty cell for left column
+    pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
+    
+    pdf.ln(8)
 
     # 3. Market Insights (Traffic/Sales Mix)
     pdf.set_font("Arial", "B", 14)
@@ -192,7 +202,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
             pdf.ln(5)
         
-        # Detailed Missed List (No Est Value, optimized VIN)
+        # Detailed Missed List
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
         
@@ -366,7 +376,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.7")
+st.title("🚗 Auto-Sales Intelligence Agent v4.9")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -396,7 +406,7 @@ if uploaded_file is not None:
         df['VIN'] = df['Page Url'].apply(extract_vin)
         df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
         
-        # v4.7: Update VDP Categories for Breakout
+        # v4.7 Logic: Update VDP Categories for Breakout
         vdp_mask = df['Category'] == 'VDP'
         df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
         
@@ -408,28 +418,47 @@ if uploaded_file is not None:
     if st.session_state.processed_data is not None:
         df = st.session_state.processed_data
         sold_df = df[df['Is Sold']]
-        # Update filter to catch "New VDP" and "Used VDP"
+        # VDP filter handles "New VDP" and "Used VDP"
         vdp_df = df[df['Category'].str.contains('VDP', na=False)]
         
-        # Prepare metrics
+        # --- METRIC CALCULATIONS ---
+        # 1. New VDPs
+        new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
+        new_sold = sold_df[sold_df['Type'] == 'New']
+        new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
+        
+        # 2. Used VDPs
+        used_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'Used')]
+        used_sold = sold_df[sold_df['Type'] == 'Used']
+        used_ltb = (len(used_sold) / len(used_vdp_all) * 100) if len(used_vdp_all) > 0 else 0
+        
+        # General Metrics
         m_units = len(sold_df)
         m_rev = sold_df['Est. Value'].sum()
         m_pipe = vdp_df['Est. Value'].sum()
         m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
         
-        # Calculate Top 10 Missed Ops
+        # Top 10 Missed Ops
         if not sold_df.empty:
             avg_v = sold_df['Attributed Unique Visitors'].mean()
             missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
         else:
             missed_df = pd.DataFrame()
 
+        # --- EXECUTIVE SUMMARY (Cleaner Layout) ---
         st.markdown("### 📊 Executive Summary")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Units Sold", m_units)
         m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
         m3.metric("Pipeline Value (Active)", f"${m_pipe:,.0f}")
-        m4.metric("Look-to-Book", f"{m_ltb:.1f}%")
+        
+        # The "Delta" Trick: Uses the delta param for sub-text, sets color to 'off' (gray)
+        m4.metric(
+            label="Look-to-Book Ratio",
+            value=f"{m_ltb:.1f}%",
+            delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%",
+            delta_color="off" 
+        )
 
         st.divider()
         
@@ -519,7 +548,14 @@ if uploaded_file is not None:
         
         ex1, ex2, ex3 = st.columns(3)
         with ex1:
-            metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}"}
+            metrics_bundle = {
+                'units_sold': m_units, 
+                'rev_sold': m_rev, 
+                'pipeline': m_pipe, 
+                'ltb': f"{m_ltb:.1f}",
+                'new_ltb': f"{new_ltb:.1f}",
+                'used_ltb': f"{used_ltb:.1f}"
+            }
             pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
             st.download_button("📥 Download PDF Summary", data=pdf_data, file_name="Sales_Intelligence_Summary.pdf", mime="application/pdf")
         with ex2:
@@ -541,10 +577,10 @@ if uploaded_file is not None:
             * **Used Cars:** Calculated using the base MSRP depreciated by age (-15% Yr 1, -10% Yrs 2+).
             * *Note: This is a directional estimate to gauge "Total Pipeline Power" and does not account for specific trim levels, options, or dealer markups.*
             
-            **3. Look-to-Book Ratio**
+            **3. Look-to-Book Ratio (New vs. Used)**
             The efficiency metric of your inventory. It measures the conversion velocity of the cars we drove traffic to.
             * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
-            * *Insight:* A higher percentage (20%+) indicates high-quality traffic meeting "Market Correct" inventory. A lower percentage suggests plenty of shoppers, but hesitation to buy (pricing/merchandising issues).
+            * *Insight:* We split this by **New** and **Used** because they turn at different rates. A high "Used" LTB with a low "New" LTB often indicates a pricing or merchandising issue on the New car inventory.
             
             **4. Top Sold Units**
             The specific "Sold" vehicles that received the highest volume of exposure from our traffic. This highlights the specific models where our audience demand matched your sales success.
