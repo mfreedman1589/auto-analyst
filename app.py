@@ -15,7 +15,7 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION (v4.9) ---
+# --- PDF GENERATOR FUNCTION (v5.0) ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
@@ -40,13 +40,13 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
     
-    # Row 2 (Pipeline & LTB)
+    # Row 2
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     
-    # Row 3 (LTB Sub-detail) - Small & Italic, aligned under LTB
+    # Row 3 (Sub-metrics)
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(col_width, 6, "", border=0) # Empty cell for left column
+    pdf.cell(col_width, 6, "", border=0)
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
     
     pdf.ln(8)
@@ -145,7 +145,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     pdf.ln(5)
 
-    # 5. Top Sold Units (Detailed List)
+    # 5. Top Sold Units (Detail)
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
     
@@ -376,7 +376,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.9")
+st.title("🚗 Auto-Sales Intelligence Agent v5.0")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -465,7 +465,8 @@ if uploaded_file is not None:
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("**Traffic Mix**")
-            traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index()
+            # SORTED descending order for Bar Chart (v5.0 update)
+            traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
             fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
             st.plotly_chart(fig1, use_container_width=True)
         with c2:
