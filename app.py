@@ -15,7 +15,7 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- PDF GENERATOR FUNCTION (v4.6) ---
+# --- PDF GENERATOR FUNCTION (v4.7) ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
@@ -48,7 +48,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, "Traffic Mix (Where visitors landed)", ln=True)
+    pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
     pdf.cell(100, 8, "Page Category", border=1)
     pdf.cell(40, 8, "Visitors", border=1)
@@ -142,7 +142,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.set_font("Arial", "B", 10)
     pdf.cell(80, 8, "Vehicle Name", border=1)
     pdf.cell(25, 8, "Type", border=1)
-    pdf.cell(20, 8, "Visits", border=1)
+    pdf.cell(20, 8, "Visitors", border=1)
     pdf.cell(65, 8, "VIN", border=1)
     pdf.ln()
 
@@ -200,7 +200,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.cell(85, 8, "Vehicle Name (Clickable)", border=1)
         pdf.cell(65, 8, "VIN", border=1)
         pdf.cell(20, 8, "Type", border=1)
-        pdf.cell(20, 8, "Visits", border=1)
+        pdf.cell(20, 8, "Visitors", border=1)
         pdf.ln()
         
         pdf.set_font("Arial", "", 9)
@@ -366,7 +366,7 @@ def check_universal_status(url, session):
         return "Available"
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent v4.6")
+st.title("🚗 Auto-Sales Intelligence Agent v4.7")
 uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
@@ -395,6 +395,11 @@ if uploaded_file is not None:
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
         df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+        
+        # v4.7: Update VDP Categories for Breakout
+        vdp_mask = df['Category'] == 'VDP'
+        df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
+        
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         st.session_state.processed_data = df
@@ -403,7 +408,8 @@ if uploaded_file is not None:
     if st.session_state.processed_data is not None:
         df = st.session_state.processed_data
         sold_df = df[df['Is Sold']]
-        vdp_df = df[df['Category'] == 'VDP']
+        # Update filter to catch "New VDP" and "Used VDP"
+        vdp_df = df[df['Category'].str.contains('VDP', na=False)]
         
         # Prepare metrics
         m_units = len(sold_df)
@@ -411,10 +417,10 @@ if uploaded_file is not None:
         m_pipe = vdp_df['Est. Value'].sum()
         m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
         
-        # Calculate Top 10 Missed Ops EARLY (needed for both dashboard and PDF)
+        # Calculate Top 10 Missed Ops
         if not sold_df.empty:
             avg_v = sold_df['Attributed Unique Visitors'].mean()
-            missed_df = df[(~df['Is Sold']) & (df['Category'] == 'VDP') & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+            missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
         else:
             missed_df = pd.DataFrame()
 
@@ -473,7 +479,7 @@ if uploaded_file is not None:
                     display_sold,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
-                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
                     },
                     use_container_width=True
                 )
@@ -499,7 +505,7 @@ if uploaded_file is not None:
                     display_missed,
                     column_config={
                         "Page Url": st.column_config.LinkColumn("Link", display_text="Open"),
-                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visits")
+                        "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")
                     },
                     use_container_width=True
                 )
