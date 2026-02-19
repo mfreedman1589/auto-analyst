@@ -17,9 +17,9 @@ st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
 # --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
-    st.session_state.history = {} # Stores all run reports
+    st.session_state.history = {} 
 if 'current_report_id' not in st.session_state:
-    st.session_state.current_report_id = None # Tracks which one we are looking at
+    st.session_state.current_report_id = None 
 
 # --- LOGIN ---
 def check_password():
@@ -78,6 +78,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
+    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -298,7 +299,7 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- ADVANCED SCANNING ENGINE ---
+# --- THE SCANNING HELPERS ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
@@ -352,81 +353,56 @@ def categorize(u):
         
     return 'Other'
 
-# V6.3 Engine with SPA Fallback Logic
+# --- THE "LEAN" SCANNING ENGINE (v6.4) ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
     try:
-        # Send standard browser headers to avoid blocks
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5'
-        }
-        
-        response = session.get(url, headers=headers, timeout=5, allow_redirects=True, stream=True)
-        
-        # 1. 404 Check
-        if response.status_code == 404 or response.status_code == 410:
-            response.close()
-            return "SOLD (404 Error)"
-            
+        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
         final_url = response.url.lower()
-        original_url = url.lower()
         
-        # 2. Hard Redirect Check
-        final_clean = final_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
-        orig_clean = original_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
-        
-        if final_clean != orig_clean:
-            if vin != "N/A" and vin.lower() not in final_clean:
+        # 1. HARD REDIRECT TRAP: Did the URL change significantly and drop the VIN?
+        if url.lower().split('?')[0] != final_url.split('?')[0]:
+            if vin != "N/A" and vin.lower() not in final_url:
                 response.close()
                 return "SOLD (Hard Redirect)"
-            
-            search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm', 'new-vehicles', 'used-vehicles']
-            if any(x in final_url for x in search_indicators) and len(final_clean) < len(orig_clean) - 10:
-                response.close()
-                return "SOLD (Hard Redirect to Search)"
+                
+        # 2. THE TEXT TRAP: Does the page explicitly say it's missing?
+        text = response.text.lower()
+        missing_phrases = [
+            "vehicle not found", 
+            "no longer available", 
+            "this vehicle has been sold", 
+            "couldn't find that vehicle", 
+            "out of stock",
+            "no vehicles matched"
+        ]
+        if any(phrase in text for phrase in missing_phrases):
+            response.close()
+            return "SOLD (Vehicle Missing)"
 
-        # 3. Text & Title Checks
-        text = response.text 
+        # 3. THE TITLE TRAP: Did it route to search, or a different car?
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
-        text_lower = text.lower()
         
-        # Bot Blockers
-        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption']
-        if any(b in page_title for b in bot_titles):
-            return "Available" 
-            
-        # Explicit Page Not Found Text
-        missing_phrases = ["vehicle not found", "no longer available", "this vehicle has been sold", "we couldn't find that vehicle", "is currently out of stock"]
-        if any(phrase in text_lower for phrase in missing_phrases):
-            return "SOLD (Page Indicates Missing)"
-            
-        # Explicit Alive Markers
-        if year in page_title:
-            return "Available"
-        if vin != "N/A" and vin.lower() in text_lower:
-            return "Available"
-            
-        # Soft Redirect Title
-        soft_redirect_titles = ['search', 'inventory', 'vehicles for sale', 'all cars', 'not found', 'error']
-        if any(term in page_title for term in soft_redirect_titles):
+        if any(x in page_title for x in ['search', 'inventory', 'all vehicles', 'not found']):
             return "SOLD (Soft Redirect)"
             
-        # SPA Default: If we didn't redirect, didn't 404, and the title is generic, assume it's alive.
+        # The SPA safety net: Only penalize missing years if the title is long enough to be a real car title
+        if len(page_title) > 30 and year not in page_title:
+            return "SOLD (Title Swapped)"
+            
         return "Available"
         
-    except Exception as e:
+    except:
         return "Available"
-
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
+# Sidebar: History & Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
@@ -448,6 +424,7 @@ if uploaded_file is not None:
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
         vdp_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
@@ -470,10 +447,12 @@ if uploaded_file is not None:
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
+        # --- GENERATE UNIQUE ID FOR HISTORY ---
         domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
         report_time = datetime.datetime.now().strftime('%I:%M %p')
         report_id = f"{domain} ({report_time})"
         
+        # Save to Vault
         st.session_state.history[report_id] = df
         st.session_state.current_report_id = report_id
         
