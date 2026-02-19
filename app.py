@@ -292,18 +292,20 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- THE SCANNING HELPERS ---
+# --- THE SMART CATEGORIZATION ENGINE ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def extract_vin(url):
+    # Enforces 17-character extraction to avoid trailing slashes or bad stock numbers
     match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
     if match: return match.group(1)
     match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
     return match.group(1).upper() if match else "N/A"
 
 def extract_type(url):
+    # Explicit New/Used URL Override (prevents 2025 used cars from being marked New)
     u = str(url).lower()
     if 'used' in u and 'new' not in u: return 'Used'
     if 'new' in u and 'used' not in u: return 'New'
@@ -337,6 +339,7 @@ def categorize(u):
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
         return 'General Search'
         
+    # TRAP FIX: Always check for Year first so /inventory/ URLs don't get mislabeled as Search pages.
     if get_year(u): return 'VDP'
     
     if any(x in u for x in ['search', 'inventory', 'vehicles']):
@@ -346,14 +349,13 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE "NO BLIND SPOTS" ENGINE (v6.9) ---
+# --- THE CLEAN FAST SCANNING ENGINE ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
     try:
-        # Advanced headers to act like a real browser and bypass basic firewalls
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -364,11 +366,11 @@ def check_universal_status(url, session):
         
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
-        # 1. EXPLICIT FIREWALL TRAP (No more silent failures)
+        # 1. THE FIREWALL TRAP (Transparent Diagnostics)
         if response.status_code in [403, 406, 429]:
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
-        # 2. 404 STATUS CODE TRAP
+        # 2. 404 TRAP
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
             
@@ -383,35 +385,31 @@ def check_universal_status(url, session):
                 return "SOLD (HTTP Redirect)"
 
         text = response.text 
-        soup = BeautifulSoup(text, 'html.parser')
-        page_title = soup.title.string.strip().lower() if soup.title else ""
         
         # 4. CLOUDFLARE "JUST A MOMENT" TRAP
-        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
-        if any(b in page_title for b in bot_titles):
+        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text:
             return "ERROR (Cloudflare Bot Block)"
             
-        # 5. META REFRESH & JS REDIRECT TRAPS (The Blind Spot Fix)
-        # Browsers follow these, but Python doesn't. We have to read the raw code to see where the site wanted to send us.
-        meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
-        if meta_refresh and meta_refresh.get('content'):
-            content = meta_refresh['content']
-            match = re.search(r'url=([^"\'>\s]+)', content, re.IGNORECASE)
-            if match:
-                meta_url = match.group(1).lower()
-                if vin != "N/A" and vin.lower() not in meta_url:
-                    return "SOLD (Meta Refresh Redirect)"
-                    
+        # 5. META/JS REDIRECT TRAP
+        # Bypasses the HTML visual to see if the background code is forcing a redirect to a search page
+        meta_refresh_match = re.search(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*content=["\']?[^"\'\>]+url=([^"\'>\s]+)["\']?', text, re.IGNORECASE)
+        if meta_refresh_match:
+            meta_url = meta_refresh_match.group(1).lower()
+            if vin != "N/A" and vin.lower() not in meta_url:
+                return "SOLD (Meta Refresh Redirect)"
+                
         js_redirects = re.findall(r'window\.location\.(?:replace|href|assign)\s*=\s*["\']([^"\'>]+)["\']', text, re.IGNORECASE)
         for js_url in js_redirects:
             if vin != "N/A" and vin.lower() not in js_url.lower():
                 return "SOLD (JS Redirect)"
 
-        # 6. PAGE NOT FOUND TITLE TRAP
+        # 6. SOFT REDIRECT TITLE TRAP
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip().lower() if title_match else ""
+        
         if 'not found' in page_title or '404' in page_title or 'error' in page_title:
             return "SOLD (Page Not Found)"
             
-        # 7. SOFT REDIRECT TITLE TRAP
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title:
             return "SOLD (Soft Redirect)"
@@ -462,7 +460,7 @@ if uploaded_file is not None:
         df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
         
-        # Ensures that firewalls don't trigger false positives
+        # Ensures that errors don't trigger false positives for the Sold count
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
         
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
@@ -517,7 +515,7 @@ if st.session_state.current_report_id is not None:
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    # NEW: FRONT-END FIREWALL ALARM
+    # --- FIREWALL DIAGNOSTIC WARNING ---
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
         st.warning(f"⚠️ **Diagnostic Alert:** The dealer's website firewall actively blocked **{len(error_df)}** of our scanning requests. These vehicles are currently marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
