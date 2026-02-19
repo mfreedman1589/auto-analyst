@@ -11,37 +11,77 @@ from bs4 import BeautifulSoup
 import datetime
 from fpdf import FPDF
 import io
-import time  # NEW: For tracking speed
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Auto-Analyst v6.0 (DEV/Telemetry)", layout="wide")
+st.set_page_config(page_title="Auto-Analyst (Dev - History)", layout="wide")
 
-# --- PDF GENERATOR (Standard v5.1 Logic) ---
+# --- SESSION STATE INITIALIZATION (The Vault) ---
+if 'history' not in st.session_state:
+    st.session_state.history = {} # Stores all run reports
+if 'current_report_id' not in st.session_state:
+    st.session_state.current_report_id = None # Tracks which one we are looking at
+
+# --- LOGIN ---
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+    if st.session_state.password_correct:
+        return True
+    st.title("🔒 Auto-Analyst Login (Dev Branch)")
+    password = st.text_input("Enter Company Password", type="password")
+    if st.button("Log In"):
+        if password == "tegna2026": 
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+    return False
+
+if not check_password():
+    st.stop()
+
+# --- PDF GENERATOR FUNCTION ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
+    
+    # 1. Header
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
     pdf.ln(5)
+
+    # 2. Executive Summary
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
     pdf.set_font("Arial", "", 12)
     pdf.ln(5)
+    
     col_width = pdf.w / 2.2
+    
+    # Row 1
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
+    
+    # Row 2
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
+    
+    # Row 3 (Sub-metrics)
     pdf.set_font("Arial", "I", 10)
     pdf.cell(col_width, 6, "", border=0)
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
+    
     pdf.ln(8)
+
+    # 3. Market Insights (Traffic/Sales Mix)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
+    
+    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -55,6 +95,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.cell(40, 8, str(row['Attributed Unique Visitors']), border=1)
         pdf.ln()
     pdf.ln(5)
+
+    # Sales Mix Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
@@ -75,6 +117,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.cell(35, 8, f"{row['Share']}%", border=1)
             pdf.ln()
         pdf.ln(5)
+
+    # Price Tier Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
@@ -95,12 +139,15 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.cell(35, 8, f"{row['Share']}%", border=1)
             pdf.ln()
     pdf.ln(10)
+
+    # 4. Top Sold Models (Aggregated)
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-        top_models = sold_models['Model_Only'].value_counts().reset_index()
-        top_models.columns = ['Make/Model', 'Units Sold']
-        top_models = top_models[top_models['Units Sold'] > 1].head(10)
+        model_counts = sold_models['Model_Only'].value_counts().reset_index()
+        model_counts.columns = ['Make/Model', 'Units Sold']
+        top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
+        
         if not top_models.empty:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, " 3. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
@@ -115,6 +162,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.cell(40, 8, str(row['Units Sold']), border=1)
                 pdf.ln()
             pdf.ln(5)
+
+    # 5. Top Sold Units (Detail)
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
     pdf.set_font("Arial", "B", 10)
@@ -123,6 +172,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(20, 8, "Visitors", border=1)
     pdf.cell(65, 8, "VIN", border=1)
     pdf.ln()
+
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         for _, row in top_sold.iterrows():
@@ -137,17 +187,21 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     else:
         pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
+
+    # 6. Missed Opportunities
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, " 4. Missed Opportunities (The Watch List)", ln=True, fill=True)
         pdf.ln(5)
+        
         if not missed_df.empty:
             missed_models = missed_df.copy()
             missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-            top_missed = missed_models['Model_Only'].value_counts().reset_index()
-            top_missed.columns = ['Make/Model', 'Count']
-            top_missed = top_missed[top_missed['Count'] > 1].head(10)
+            missed_counts = missed_models['Model_Only'].value_counts().reset_index()
+            missed_counts.columns = ['Make/Model', 'Count']
+            top_missed = missed_counts[missed_counts['Count'] > 1].head(10)
+            
             if not top_missed.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Top Missed Models (Aggregated > 1 Unit)", ln=True)
@@ -161,6 +215,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                     pdf.cell(40, 8, str(row['Count']), border=1)
                     pdf.ln()
                 pdf.ln(5)
+        
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
         pdf.set_font("Arial", "B", 10)
@@ -177,7 +232,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.set_text_color(0, 0, 255) 
                 pdf.cell(85, 8, name, border=1, link=url)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 8)
+                pdf.set_font("Arial", "", 8) 
                 pdf.cell(65, 8, str(row['VIN']), border=1)
                 pdf.set_font("Arial", "", 9)
                 pdf.cell(20, 8, str(row['Type']), border=1)
@@ -185,33 +240,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
-# --- SESSION STATE INITIALIZATION ---
-if 'processed_data' not in st.session_state:
-    st.session_state.processed_data = None
-# NEW: Session state for telemetry logs
-if 'telemetry_log' not in st.session_state:
-    st.session_state.telemetry_log = []
 
-# --- LOGIN ---
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-    if st.session_state.password_correct:
-        return True
-    st.title("🔒 Auto-Analyst Login (Dev Branch)")
-    password = st.text_input("Enter Company Password", type="password")
-    if st.button("Log In"):
-        if password == "tegna2026": # In dev, hardcoded is fine for testing
-            st.session_state.password_correct = True
-            st.rerun()
-        else:
-            st.error("Incorrect password")
-    return False
-
-if not check_password():
-    st.stop()
-
-# --- VALUATION ENGINE (Standard) ---
+# --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
     vehicle_type = str(row['Type']).lower()
@@ -275,7 +305,7 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- STANDARD SCANNING HELPERS ---
+# --- THE SCANNING ENGINE (Cleaned Revert) ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
@@ -311,104 +341,58 @@ def categorize(u):
     if get_year(u): return 'VDP'
     return 'Other'
 
-# --- ⚡ TELEMETRY SCANNING ENGINE ---
-# Instead of returning just status, we return (Status, TimeTaken, WasRetried)
-def check_status_with_telemetry(url, session):
+def check_universal_status(url, session):
     year = get_year(url)
-    if not year: return ("N/A", 0, False)
-    
-    start_time = time.time()
-    retried = False
-    
-    # We define headers inside here to ensure fresh session usage
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
-    
+    if not year: return "N/A"
     try:
-        # Standard Request
-        # Note: We are trusting the session's mount to handle the retries, 
-        # but we can't easily detect if urllib3 retried inside the adapter without hooks.
-        # Instead, we measure TIME. If time > timeout, we know retries happened or it hung.
-        
-        response = session.get(url, timeout=3, allow_redirects=True, stream=True, headers=headers)
-        
-        # Check elapsed time
-        elapsed = time.time() - start_time
-        if elapsed > 3.5: # If it took longer than the timeout, a retry likely occurred
-            retried = True
-            
+        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
         final_url = response.url.lower()
         search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
-        
-        status = "Available"
-        
         if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
             response.close()
-            status = "SOLD (Hard Redirect)"
-        else:
-            text = response.text 
-            soup = BeautifulSoup(text, 'html.parser')
-            page_title = soup.title.string.strip().lower() if soup.title else ""
-            if year not in page_title and len(page_title) > 5:
-                status = "SOLD (Soft Redirect)"
-        
-        return (status, elapsed, retried)
-        
-    except Exception as e:
-        # If we are here, we exhausted retries and failed
-        elapsed = time.time() - start_time
-        return ("Available", elapsed, True)
+            return "SOLD (Hard Redirect)"
+        text = response.text 
+        soup = BeautifulSoup(text, 'html.parser')
+        page_title = soup.title.string.strip().lower() if soup.title else ""
+        if year not in page_title and len(page_title) > 5:
+            return "SOLD (Soft Redirect)"
+        return "Available"
+    except:
+        return "Available"
+
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Analyst v6.0 (DEV)")
-st.caption("⚡ Debug Mode: Monitoring Connection Speeds & Retry Effectiveness")
+st.title("🚗 Auto-Sales Intelligence Agent")
 
-uploaded_file = st.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
+# Sidebar: History & Upload
+st.sidebar.markdown("### 📥 New Analysis")
+uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
-    if st.button("🚀 Run Diagnostic Analysis"):
+    if st.sidebar.button("🚀 Run Diagnostic Analysis"):
         df_raw = pd.read_csv(uploaded_file)
         df_raw['Category'] = df_raw['Page Url'].apply(categorize)
         vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
         
-        st.info(f"Scanning {len(vdp_urls)} Vehicles...")
+        st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
         progress_bar = st.progress(0)
         
-        # Session with Retry
         session = requests.Session()
-        retry_strategy = Retry(
-            total=3, # The variable in question
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-        )
+        retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
-        # Telemetry Storage
-        telemetry_results = []
-        status_results = {}
-        
+        vdp_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-            future_to_url = {executor.submit(check_status_with_telemetry, url, session): url for url in vdp_urls}
-            
+            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
             for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
                 url = future_to_url[future]
-                status, time_taken, was_retried = future.result()
-                
-                status_results[url] = status
-                telemetry_results.append({
-                    'Status': status,
-                    'Time': time_taken,
-                    'Retried': was_retried
-                })
-                
+                vdp_results[url] = future.result()
                 progress_bar.progress((i + 1) / len(vdp_urls))
-
-        # Save logs to session state
-        st.session_state.telemetry_log = telemetry_results
-        
-        # Process Data as usual
-        df_raw['Sold_Status'] = df_raw['Page Url'].map(status_results).fillna('N/A')
+                
+        df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
@@ -421,152 +405,163 @@ if uploaded_file is not None:
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
-        st.session_state.processed_data = df
+        # --- GENERATE UNIQUE ID FOR HISTORY ---
+        # Extract dealer name from the first VDP URL (e.g., twinpineford.com -> twinpineford)
+        domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
+        report_time = datetime.datetime.now().strftime('%I:%M %p')
+        report_id = f"{domain} ({report_time})"
+        
+        # Save to Vault
+        st.session_state.history[report_id] = df
+        st.session_state.current_report_id = report_id
+        
         st.rerun()
 
-    # --- SIDEBAR TELEMETRY REPORT ---
-    if st.session_state.telemetry_log:
-        st.sidebar.markdown("## ⚡ System Telemetry")
-        logs = pd.DataFrame(st.session_state.telemetry_log)
+# --- SIDEBAR: SESSION HISTORY MANAGER ---
+if st.session_state.history:
+    st.sidebar.divider()
+    st.sidebar.markdown("### 📂 Session History")
+    st.sidebar.caption("Reports run during this browser session.")
+    
+    report_names = list(st.session_state.history.keys())
+    
+    # Selectbox to toggle between saved reports
+    selected_report = st.sidebar.radio(
+        "Select a report to view:", 
+        options=report_names, 
+        index=report_names.index(st.session_state.current_report_id)
+    )
+    
+    # If user clicks a different report in history, swap it instantly
+    if selected_report != st.session_state.current_report_id:
+        st.session_state.current_report_id = selected_report
+        st.rerun()
         
-        avg_time = logs['Time'].mean()
-        max_time = logs['Time'].max()
-        slow_reqs = logs[logs['Time'] > 3.0] # Took longer than initial timeout
-        retry_count = len(slow_reqs)
-        
-        # Did retries actually save us?
-        # A "Save" is a slow request that eventually returned SOLD.
-        saved_reqs = slow_reqs[slow_reqs['Status'].str.contains("SOLD")]
-        save_count = len(saved_reqs)
-        
-        st.sidebar.metric("Avg Load Time", f"{avg_time:.2f}s")
-        st.sidebar.metric("Slow Requests (>3s)", retry_count)
-        st.sidebar.metric("Retries that found Sales", save_count)
-        
-        if retry_count > 0:
-            success_rate = (save_count / retry_count) * 100
-            st.sidebar.write(f"Retry Effectiveness: **{success_rate:.1f}%**")
-            if success_rate < 5:
-                st.sidebar.warning("⚠️ Retries are adding delay but finding almost no sales. Consider disabling.")
-            else:
-                st.sidebar.success("✅ Retries are finding hidden sales. Keep them.")
-        else:
-            st.sidebar.info("🚀 Site is fast. No retries needed.")
+    st.sidebar.divider()
+    if st.sidebar.button("🗑️ Clear History"):
+        st.session_state.history = {}
+        st.session_state.current_report_id = None
+        st.rerun()
 
-    # --- MAIN DASHBOARD (Same as v5.1) ---
-    if st.session_state.processed_data is not None:
-        df = st.session_state.processed_data
-        sold_df = df[df['Is Sold']]
-        vdp_df = df[df['Category'].str.contains('VDP', na=False)]
-        
-        new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
-        new_sold = sold_df[sold_df['Type'] == 'New']
-        new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
-        
-        used_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'Used')]
-        used_sold = sold_df[sold_df['Type'] == 'Used']
-        used_ltb = (len(used_sold) / len(used_vdp_all) * 100) if len(used_vdp_all) > 0 else 0
-        
-        m_units = len(sold_df)
-        m_rev = sold_df['Est. Value'].sum()
-        m_pipe = vdp_df['Est. Value'].sum()
-        m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
-        
+# --- MAIN DASHBOARD DISPLAY ---
+if st.session_state.current_report_id is not None:
+    st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
+    
+    # Pull data from the Vault
+    df = st.session_state.history[st.session_state.current_report_id]
+    
+    sold_df = df[df['Is Sold']]
+    vdp_df = df[df['Category'].str.contains('VDP', na=False)]
+    
+    # Metrics
+    new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
+    new_sold = sold_df[sold_df['Type'] == 'New']
+    new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
+    
+    used_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'Used')]
+    used_sold = sold_df[sold_df['Type'] == 'Used']
+    used_ltb = (len(used_sold) / len(used_vdp_all) * 100) if len(used_vdp_all) > 0 else 0
+    
+    m_units = len(sold_df)
+    m_rev = sold_df['Est. Value'].sum()
+    m_pipe = vdp_df['Est. Value'].sum()
+    m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
+    
+    if not sold_df.empty:
+        avg_v = sold_df['Attributed Unique Visitors'].mean()
+        missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+    else:
+        missed_df = pd.DataFrame()
+
+    # Executive Summary
+    st.markdown("### 📊 Executive Summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Units Sold", m_units)
+    m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
+    m3.metric("Pipeline Value (Active)", f"${m_pipe:,.0f}")
+    m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
+
+    st.divider()
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Traffic Mix**")
+        traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
+        fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
+        st.plotly_chart(fig1, use_container_width=True)
+    with c2:
+        st.markdown("**Sales Mix (New vs Used)**")
         if not sold_df.empty:
-            avg_v = sold_df['Attributed Unique Visitors'].mean()
-            missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+            type_counts = sold_df['Type'].value_counts().reset_index()
+            type_counts.columns = ['Type', 'Count']
+            fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'}, hover_data=['Count'])
+            fig2.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig2, use_container_width=True)
+    with c3:
+        st.markdown("**Sold Value Tiers**")
+        if not sold_df.empty:
+            tier_counts = sold_df['Price Tier'].value_counts().reset_index()
+            tier_counts.columns = ['Price Tier', 'Count']
+            fig3 = px.pie(tier_counts, values='Count', names='Price Tier', color_discrete_sequence=px.colors.qualitative.Set2, hover_data=['Count'])
+            fig3.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig3, use_container_width=True)
+
+    t1, t2 = st.columns(2)
+    with t1:
+        if not sold_df.empty:
+            sold_models = sold_df.copy()
+            sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            model_counts = sold_models['Model_Only'].value_counts().reset_index()
+            model_counts.columns = ['Make/Model', 'Units Sold']
+            top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
+            if not top_models.empty:
+                st.subheader("🏆 Top Sold Models (Aggregated > 1 Unit)")
+                st.dataframe(top_models, use_container_width=True, hide_index=True)
+                st.divider()
+
+        st.subheader("Top Sold Units (Detail)")
+        if not sold_df.empty:
+            top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+            display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+            display_sold.index += 1
+            st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
         else:
-            missed_df = pd.DataFrame()
+            st.info("No sales identified.")
 
-        st.markdown("### 📊 Executive Summary")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Units Sold", m_units)
-        m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
-        m3.metric("Pipeline Value (Active)", f"${m_pipe:,.0f}")
-        m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
+    with t2:
+        if not missed_df.empty:
+            missed_models = missed_df.copy()
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            missed_counts = missed_models['Model_Only'].value_counts().reset_index()
+            missed_counts.columns = ['Make/Model', 'Missed Count']
+            top_missed = missed_counts[missed_counts['Missed Count'] > 1].head(10)
+            if not top_missed.empty:
+                st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
+                st.dataframe(top_missed, use_container_width=True, hide_index=True)
+                st.divider()
 
-        st.divider()
-        
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("**Traffic Mix**")
-            traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
-            fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
-            st.plotly_chart(fig1, use_container_width=True)
-        with c2:
-            st.markdown("**Sales Mix (New vs Used)**")
-            if not sold_df.empty:
-                type_counts = sold_df['Type'].value_counts().reset_index()
-                type_counts.columns = ['Type', 'Count']
-                fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', color_discrete_map={'New':'#4F81BD', 'Used':'#C0504D'}, hover_data=['Count'])
-                fig2.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig2, use_container_width=True)
-        with c3:
-            st.markdown("**Sold Value Tiers**")
-            if not sold_df.empty:
-                tier_counts = sold_df['Price Tier'].value_counts().reset_index()
-                tier_counts.columns = ['Price Tier', 'Count']
-                fig3 = px.pie(tier_counts, values='Count', names='Price Tier', color_discrete_sequence=px.colors.qualitative.Set2, hover_data=['Count'])
-                fig3.update_traces(textposition='inside', textinfo='percent+label')
-                st.plotly_chart(fig3, use_container_width=True)
+        st.subheader("Missed Opportunities (Detail)")
+        if not missed_df.empty:
+            display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+            display_missed.index += 1
+            st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+        else:
+            st.info("No missed opportunities identified.")
 
-        t1, t2 = st.columns(2)
-        with t1:
-            if not sold_df.empty:
-                sold_models = sold_df.copy()
-                sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-                top_models = sold_models['Model_Only'].value_counts().reset_index()
-                top_models.columns = ['Make/Model', 'Units Sold']
-                top_models = top_models[top_models['Units Sold'] > 1].head(10)
-                if not top_models.empty:
-                    st.subheader("🏆 Top Sold Models (Aggregated > 1 Unit)")
-                    st.dataframe(top_models, use_container_width=True, hide_index=True)
-                    st.divider()
+    st.divider()
+    st.markdown("### 📥 Export Reports")
+    
+    include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF Report?", value=True)
+    
+    ex1, ex2, ex3 = st.columns(3)
+    with ex1:
+        metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
+        st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
+    with ex2:
+        st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
+    with ex3:
+        st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
 
-            st.subheader("Top Sold Units (Detail)")
-            if not sold_df.empty:
-                top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-                display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-                display_sold.index += 1
-                st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
-            else:
-                st.info("No sales identified.")
-
-        with t2:
-            if not missed_df.empty:
-                missed_models = missed_df.copy()
-                missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-                top_missed = missed_models['Model_Only'].value_counts().reset_index()
-                top_missed.columns = ['Make/Model', 'Missed Count']
-                top_missed = top_missed[top_missed['Missed Count'] > 1].head(10)
-                if not top_missed.empty:
-                    st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
-                    st.dataframe(top_missed, use_container_width=True, hide_index=True)
-                    st.divider()
-
-            st.subheader("Missed Opportunities (Detail)")
-            if not missed_df.empty:
-                display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-                display_missed.index += 1
-                st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
-            else:
-                st.info("No missed opportunities identified.")
-
-        st.divider()
-        st.markdown("### 📥 Export Reports")
-        
-        include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF Report?", value=True)
-        
-        ex1, ex2, ex3 = st.columns(3)
-        with ex1:
-            metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-            pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
-            st.download_button("📥 Download PDF Summary", data=pdf_data, file_name="Sales_Intelligence_Summary.pdf", mime="application/pdf")
-        with ex2:
-            st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), "Sold_Report.csv", "text/csv")
-        with ex3:
-            st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), "Full_Market_Analysis.csv", "text/csv")
-
-        st.divider()
-        with st.expander("ℹ️ Glossary & Guide"):
-            st.markdown("### Definitions & Insights...") # Glossary (abbreviated)
+else:
+    st.info("👈 Upload a CSV in the sidebar to begin analysis.")
