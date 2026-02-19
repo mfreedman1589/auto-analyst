@@ -7,7 +7,6 @@ import re
 import concurrent.futures
 import plotly.express as px
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
 import datetime
 from fpdf import FPDF
 import io
@@ -353,7 +352,7 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE "LEAN" SCANNING ENGINE (v6.4) ---
+# --- THE "LEAN" SCANNING ENGINE (v6.5) ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
@@ -377,27 +376,25 @@ def check_universal_status(url, session):
             "this vehicle has been sold", 
             "couldn't find that vehicle", 
             "out of stock",
-            "no vehicles matched"
+            "no vehicles matched",
+            "vehicle is no longer in stock"
         ]
         if any(phrase in text for phrase in missing_phrases):
             response.close()
             return "SOLD (Vehicle Missing)"
 
-        # 3. THE TITLE TRAP: Did it route to search, or a different car?
-        soup = BeautifulSoup(text, 'html.parser')
-        page_title = soup.title.string.strip().lower() if soup.title else ""
+        # 3. THE ERROR TITLE TRAP
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else ""
         
-        if any(x in page_title for x in ['search', 'inventory', 'all vehicles', 'not found']):
-            return "SOLD (Soft Redirect)"
-            
-        # The SPA safety net: Only penalize missing years if the title is long enough to be a real car title
-        if len(page_title) > 30 and year not in page_title:
-            return "SOLD (Title Swapped)"
+        if 'not found' in page_title or '404' in page_title:
+            return "SOLD (Page Not Found)"
             
         return "Available"
         
     except:
         return "Available"
+
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
