@@ -45,14 +45,12 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
     
-    # 1. Header
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
     pdf.ln(5)
 
-    # 2. Executive Summary
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
@@ -73,12 +71,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     pdf.ln(8)
 
-    # 3. Market Insights
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
-    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -135,7 +131,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
     pdf.ln(10)
 
-    # 4. Top Sold Models (Aggregated)
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
@@ -158,7 +153,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
             pdf.ln(5)
 
-    # 5. Top Sold Units (Detail)
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
     pdf.set_font("Arial", "B", 10)
@@ -183,7 +177,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 6. Missed Opportunities
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
@@ -299,7 +292,7 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- THE SCANNING HELPERS (The "Smart Traps") ---
+# --- THE SCANNING HELPERS ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
@@ -353,64 +346,89 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE ORIGINAL-STYLE ENGINE (v6.8) ---
+# --- THE "NO BLIND SPOTS" ENGINE (v6.9) ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
     try:
-        # Standard browser headers required for modern dealership sites
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = session.get(url, headers=headers, timeout=3, allow_redirects=True, stream=True)
+        # Advanced headers to act like a real browser and bypass basic firewalls
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
         
-        # 1. 404 Status Code Check
+        response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        
+        # 1. EXPLICIT FIREWALL TRAP (No more silent failures)
+        if response.status_code in [403, 406, 429]:
+            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
+            
+        # 2. 404 STATUS CODE TRAP
         if response.status_code in [404, 410]:
-            response.close()
             return "SOLD (404 Error)"
             
-        # 2. Hard Redirect Check (Your Exact Fix)
-        # We strip trailing slashes to compare the core path of the URL.
+        # 3. HTTP HARD REDIRECT TRAP
         orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         
         if orig_base != final_base:
-            # If the URL changed to an SRP, the specific VIN will be gone from the URL.
             if vin != "N/A" and vin.lower() not in final_base:
-                response.close()
-                return "SOLD (Hard Redirect)"
-            # Fallback: If it changed to an SRP, the specific Year will also likely be gone.
+                return "SOLD (HTTP Redirect)"
             if year not in final_base:
-                response.close()
-                return "SOLD (Hard Redirect)"
+                return "SOLD (HTTP Redirect)"
 
-        # 3. Soft Redirect Title Check (Original v5.1 Logic, slightly protected)
         text = response.text 
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # Explicit "Missing Car" titles
+        # 4. CLOUDFLARE "JUST A MOMENT" TRAP
+        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
+        if any(b in page_title for b in bot_titles):
+            return "ERROR (Cloudflare Bot Block)"
+            
+        # 5. META REFRESH & JS REDIRECT TRAPS (The Blind Spot Fix)
+        # Browsers follow these, but Python doesn't. We have to read the raw code to see where the site wanted to send us.
+        meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
+        if meta_refresh and meta_refresh.get('content'):
+            content = meta_refresh['content']
+            match = re.search(r'url=([^"\'>\s]+)', content, re.IGNORECASE)
+            if match:
+                meta_url = match.group(1).lower()
+                if vin != "N/A" and vin.lower() not in meta_url:
+                    return "SOLD (Meta Refresh Redirect)"
+                    
+        js_redirects = re.findall(r'window\.location\.(?:replace|href|assign)\s*=\s*["\']([^"\'>]+)["\']', text, re.IGNORECASE)
+        for js_url in js_redirects:
+            if vin != "N/A" and vin.lower() not in js_url.lower():
+                return "SOLD (JS Redirect)"
+
+        # 6. PAGE NOT FOUND TITLE TRAP
         if 'not found' in page_title or '404' in page_title or 'error' in page_title:
             return "SOLD (Page Not Found)"
             
-        # The SPA Trap Guardrail:
-        # Instead of failing any title that lacks a year, we ONLY fail it if the title 
-        # explicitly indicates it is a Search Results or Generic Inventory page.
-        search_indicators = ['search', 'results', 'all vehicles']
-        if any(x in page_title for x in search_indicators):
-            if year not in page_title:
-                return "SOLD (Soft Redirect)"
-                
-        # If it didn't redirect, and doesn't say "Not Found" or "Search", it's Available.
+        # 7. SOFT REDIRECT TITLE TRAP
+        search_indicators = ['search', 'results', 'all vehicles', 'inventory']
+        if any(x in page_title for x in search_indicators) and year not in page_title:
+            return "SOLD (Soft Redirect)"
+            
         return "Available"
         
+    except requests.exceptions.Timeout:
+        return "ERROR (Timeout)"
+    except requests.exceptions.ConnectionError:
+        return "ERROR (Connection Blocked)"
     except Exception as e:
         return "Available"
+
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
-# Sidebar: History & Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
@@ -444,6 +462,7 @@ if uploaded_file is not None:
         df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
         
+        # Ensures that firewalls don't trigger false positives
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
         
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
@@ -497,6 +516,11 @@ if st.session_state.current_report_id is not None:
     
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
+    
+    # NEW: FRONT-END FIREWALL ALARM
+    error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
+    if not error_df.empty:
+        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's website firewall actively blocked **{len(error_df)}** of our scanning requests. These vehicles are currently marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
