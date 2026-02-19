@@ -13,7 +13,7 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Auto-Analyst (Dev - History)", layout="wide")
+st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
 # --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
@@ -27,7 +27,7 @@ def check_password():
         st.session_state.password_correct = False
     if st.session_state.password_correct:
         return True
-    st.title("🔒 Auto-Analyst Login (Dev Branch)")
+    st.title("🔒 Auto-Analyst Login")
     password = st.text_input("Enter Company Password", type="password")
     if st.button("Log In"):
         if password == "tegna2026": 
@@ -45,14 +45,12 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
     
-    # 1. Header
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
     pdf.ln(5)
 
-    # 2. Executive Summary
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
@@ -60,28 +58,20 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.ln(5)
     
     col_width = pdf.w / 2.2
-    
-    # Row 1
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
-    
-    # Row 2
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     
-    # Row 3 (Sub-metrics)
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(col_width, 6, "", border=0)
+    pdf.cell(col_width, 6, "", border=0) 
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
-    
     pdf.ln(8)
 
-    # 3. Market Insights (Traffic/Sales Mix)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
-    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -96,7 +86,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.ln()
     pdf.ln(5)
 
-    # Sales Mix Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
@@ -118,7 +107,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
         pdf.ln(5)
 
-    # Price Tier Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
@@ -140,7 +128,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
     pdf.ln(10)
 
-    # 4. Top Sold Models (Aggregated)
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
@@ -163,7 +150,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
             pdf.ln(5)
 
-    # 5. Top Sold Units (Detail)
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
     pdf.set_font("Arial", "B", 10)
@@ -188,7 +174,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 6. Missed Opportunities
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
@@ -305,14 +290,27 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- THE SCANNING ENGINE (Cleaned Revert) ---
+# --- ADVANCED SCANNING ENGINE ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def extract_vin(url):
-    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|$|\?)', str(url))
+    # Fix 1: Specific hunt for exact 17-character VINs regardless of slashes
+    match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
+    if match: return match.group(1)
+    
+    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
     return match.group(1).upper() if match else "N/A"
+
+def extract_type(url):
+    # Fix 2: Explicitly checks if the URL says "used-2025" so it doesn't get labeled "New"
+    u = str(url).lower()
+    if 'used' in u and 'new' not in u: return 'Used'
+    if 'new' in u and 'used' not in u: return 'New'
+    if '/used' in u or '-used-' in u or '=used' in u or 'preowned' in u: return 'Used'
+    if '/new' in u or '-new-' in u or '=new' in u: return 'New'
+    return 'New' if re.search(r'202[5-7]', u) else 'Used'
 
 def clean_name_universal(url):
     year = get_year(url)
@@ -333,24 +331,47 @@ def clean_name_universal(url):
 def categorize(u):
     u = str(u).lower()
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
-    if any(x in u for x in ['search', 'inventory']):
+    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+    
+    if 'index.htm' in u or u.endswith('searchnew.aspx') or u.endswith('searchused.aspx') or u.endswith('searchall.aspx'):
         if 'new' in u: return 'New Car Search'
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
         return 'General Search'
-    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+        
+    # Fix 3: Prioritize Year checking before Inventory keyword to catch /inventory/new-2025/ URLs
     if get_year(u): return 'VDP'
+    
+    if any(x in u for x in ['search', 'inventory', 'vehicles']):
+        if 'new' in u: return 'New Car Search'
+        if 'used' in u or 'preowned' in u: return 'Used Car Search'
+        return 'General Search'
+        
     return 'Other'
 
 def check_universal_status(url, session):
     year = get_year(url)
+    vin = extract_vin(url)
     if not year: return "N/A"
     try:
         response = session.get(url, timeout=3, allow_redirects=True, stream=True)
         final_url = response.url.lower()
-        search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
-        if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
-            response.close()
-            return "SOLD (Hard Redirect)"
+        original_url = url.lower()
+        
+        # Strip protocols for accurate comparison
+        final_clean = final_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
+        orig_clean = original_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
+        
+        # Fix 4: Smarter redirect checking - Does the VIN disappear?
+        if final_clean != orig_clean:
+            if vin != "N/A" and vin.lower() not in final_clean:
+                response.close()
+                return "SOLD (Hard Redirect)"
+            
+            search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm', 'new-vehicles', 'used-vehicles']
+            if any(x in final_url for x in search_indicators) and len(final_clean) < len(orig_clean) - 10:
+                response.close()
+                return "SOLD (Hard Redirect)"
+
         text = response.text 
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
@@ -371,6 +392,11 @@ uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['c
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
         df_raw = pd.read_csv(uploaded_file)
+        
+        # Dynamic Column Name check
+        url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
+        df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
+        
         df_raw['Category'] = df_raw['Page Url'].apply(categorize)
         vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
         
@@ -397,7 +423,7 @@ if uploaded_file is not None:
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
-        df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+        df['Type'] = df['Page Url'].apply(extract_type)
         
         vdp_mask = df['Category'] == 'VDP'
         df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
@@ -406,7 +432,6 @@ if uploaded_file is not None:
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
         # --- GENERATE UNIQUE ID FOR HISTORY ---
-        # Extract dealer name from the first VDP URL (e.g., twinpineford.com -> twinpineford)
         domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
         report_time = datetime.datetime.now().strftime('%I:%M %p')
         report_id = f"{domain} ({report_time})"
@@ -425,14 +450,12 @@ if st.session_state.history:
     
     report_names = list(st.session_state.history.keys())
     
-    # Selectbox to toggle between saved reports
     selected_report = st.sidebar.radio(
         "Select a report to view:", 
         options=report_names, 
         index=report_names.index(st.session_state.current_report_id)
     )
     
-    # If user clicks a different report in history, swap it instantly
     if selected_report != st.session_state.current_report_id:
         st.session_state.current_report_id = selected_report
         st.rerun()
@@ -447,13 +470,11 @@ if st.session_state.history:
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
-    # Pull data from the Vault
     df = st.session_state.history[st.session_state.current_report_id]
     
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    # Metrics
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
     new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
@@ -473,7 +494,6 @@ if st.session_state.current_report_id is not None:
     else:
         missed_df = pd.DataFrame()
 
-    # Executive Summary
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Units Sold", m_units)
@@ -562,6 +582,40 @@ if st.session_state.current_report_id is not None:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex3:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
+
+    st.divider()
+    with st.expander("ℹ️ Glossary & Guide: How to read this report"):
+        st.markdown("""
+        ### **Definitions & Insights**
+        
+        **1. Units Sold**
+        The total count of vehicles that were identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site was actively shopping for cars that moved off the lot.
+        
+        **2. Estimated Value (Rev & Pipeline)**
+        A data-driven approximation of the inventory's dollar value. 
+        * **New Cars:** Calculated using 2025/2026 Base MSRP for the specific model.
+        * **Used Cars:** Calculated using the base MSRP depreciated by age (-15% Yr 1, -10% Yrs 2+).
+        * *Note: This is a directional estimate to gauge "Total Pipeline Power" and does not account for specific trim levels, options, or dealer markups.*
+        
+        **3. Look-to-Book Ratio (New vs. Used)**
+        The efficiency metric of your inventory. It measures the conversion velocity of the cars we drove traffic to.
+        * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
+        * *Insight:* We split this by **New** and **Used** because they turn at different rates. A high "Used" LTB with a low "New" LTB often indicates a pricing or merchandising issue on the New car inventory.
+        
+        **4. Top Sold Units**
+        The specific "Sold" vehicles that received the highest volume of exposure from our traffic. This highlights the specific models where our audience demand matched your sales success.
+        
+        **5. Missed Opportunities**
+        **"The Watch List."** These are active vehicles receiving **above-average traffic** but haven't sold yet. 
+        * *Why this matters:* You are paying for popularity, but not getting the sale. 
+        * *Action Item:* Audit these VDPs immediately. Check for **missing photos**, **"Call for Price" buttons** (which lower conversion), or **pricing outliers**. These units are "High Interest" and likely just need a small nudge to sell.
+        
+        **6. Traffic Mix**
+        A breakdown of where our audience lands and navigates.
+        * **VDP (Vehicle Detail Page):** The "Money Page." High VDP traffic proves the audience is "Deep Funnel"—shopping for specific VINs rather than just browsing.
+        * **Service/Parts:** Captures fixed-ops intent.
+        * **New vs. Used:** Helps align your marketing spend with actual inventory interest.
+        """)
 
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
