@@ -352,7 +352,7 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE "LEAN" SCANNING ENGINE (v6.5) ---
+# --- THE "GOLDEN" SCANNING ENGINE (v6.6) ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
@@ -360,41 +360,50 @@ def check_universal_status(url, session):
     
     try:
         response = session.get(url, timeout=3, allow_redirects=True, stream=True)
-        final_url = response.url.lower()
         
-        # 1. HARD REDIRECT TRAP: Did the URL change significantly and drop the VIN?
-        if url.lower().split('?')[0] != final_url.split('?')[0]:
-            if vin != "N/A" and vin.lower() not in final_url:
+        # 1. STATUS CODE TRAP
+        if response.status_code == 404 or response.status_code == 410:
+            response.close()
+            return "SOLD (404 Error)"
+            
+        final_url = response.url.lower()
+        orig_url = url.lower()
+        
+        # 2. HARD REDIRECT TRAP
+        # Strip trailing slashes and parameters to see if the core path changed
+        final_clean = final_url.split('?')[0].rstrip('/')
+        orig_clean = orig_url.split('?')[0].rstrip('/')
+        
+        if orig_clean != final_clean:
+            if vin != "N/A" and vin.lower() not in final_clean:
                 response.close()
                 return "SOLD (Hard Redirect)"
-                
-        # 2. THE TEXT TRAP: Does the page explicitly say it's missing?
-        text = response.text.lower()
-        missing_phrases = [
-            "vehicle not found", 
-            "no longer available", 
-            "this vehicle has been sold", 
-            "couldn't find that vehicle", 
-            "out of stock",
-            "no vehicles matched",
-            "vehicle is no longer in stock"
-        ]
-        if any(phrase in text for phrase in missing_phrases):
-            response.close()
-            return "SOLD (Vehicle Missing)"
 
-        # 3. THE ERROR TITLE TRAP
+        # 3. TITLE TRAPS
+        # Uses Regex instead of BeautifulSoup for maximum speed on large lists
+        text = response.text
         title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
-        page_title = title_match.group(1).strip() if title_match else ""
+        page_title = title_match.group(1).strip().lower() if title_match else ""
         
-        if 'not found' in page_title or '404' in page_title:
+        # Bot Protections (Ignore and default to available)
+        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption']
+        if any(b in page_title for b in bot_titles):
+            return "Available"
+            
+        # Explicit Error Titles
+        if 'not found' in page_title or '404' in page_title or 'error' in page_title:
             return "SOLD (Page Not Found)"
+            
+        # Soft Redirect to Search Page (Crucial: only triggers if Year is missing)
+        # We use explicit phrases, not just "inventory", to prevent punishing generic dealer names
+        search_titles = ['search results', 'all vehicles', 'all cars', 'new inventory', 'used inventory', 'pre-owned inventory']
+        if any(x in page_title for x in search_titles) and year not in page_title:
+            return "SOLD (Soft Redirect)"
             
         return "Available"
         
-    except:
+    except Exception as e:
         return "Available"
-
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
