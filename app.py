@@ -17,9 +17,9 @@ st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
 # --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
-    st.session_state.history = {} # Stores all run reports
+    st.session_state.history = {} 
 if 'current_report_id' not in st.session_state:
-    st.session_state.current_report_id = None # Tracks which one we are looking at
+    st.session_state.current_report_id = None 
 
 # --- LOGIN ---
 def check_password():
@@ -45,14 +45,12 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
     
-    # 1. Header
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
     pdf.ln(5)
 
-    # 2. Executive Summary
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
@@ -61,27 +59,22 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     col_width = pdf.w / 2.2
     
-    # Row 1
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
     
-    # Row 2
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     
-    # Row 3 (Sub-metrics)
     pdf.set_font("Arial", "I", 10)
     pdf.cell(col_width, 6, "", border=0) 
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
     
     pdf.ln(8)
 
-    # 3. Market Insights (Traffic/Sales Mix)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
-    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -96,7 +89,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.ln()
     pdf.ln(5)
 
-    # Sales Mix Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
@@ -118,7 +110,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
         pdf.ln(5)
 
-    # Price Tier Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
@@ -140,7 +131,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
     pdf.ln(10)
 
-    # 4. Top Sold Models (Aggregated)
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
@@ -163,7 +153,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
             pdf.ln(5)
 
-    # 5. Top Sold Units (Detail)
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
     pdf.set_font("Arial", "B", 10)
@@ -188,7 +177,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.set_font("Arial", "", 9)
         pdf.cell(0, 8, "No sales identified.", border=1, ln=True)
 
-    # 6. Missed Opportunities
     if include_missed:
         pdf.add_page()
         pdf.set_font("Arial", "B", 14)
@@ -239,7 +227,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                 pdf.ln()
     return bytes(pdf.output())
-
 
 # --- THE VALUATION ENGINE ---
 def estimate_value(row):
@@ -305,14 +292,26 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- THE SCANNING ENGINE ---
+# --- THE SMART CATEGORIZATION ENGINE ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def extract_vin(url):
-    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|$|\?)', str(url))
+    # Enforces 17-character extraction to avoid trailing slashes or bad stock numbers
+    match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
+    if match: return match.group(1)
+    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
     return match.group(1).upper() if match else "N/A"
+
+def extract_type(url):
+    # Explicit New/Used URL Override (prevents 2025 used cars from being marked New)
+    u = str(url).lower()
+    if 'used' in u and 'new' not in u: return 'Used'
+    if 'new' in u and 'used' not in u: return 'New'
+    if '/used' in u or '-used-' in u or '=used' in u or 'preowned' in u: return 'Used'
+    if '/new' in u or '-new-' in u or '=new' in u: return 'New'
+    return 'New' if re.search(r'202[5-7]', u) else 'Used'
 
 def clean_name_universal(url):
     year = get_year(url)
@@ -333,44 +332,111 @@ def clean_name_universal(url):
 def categorize(u):
     u = str(u).lower()
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
-    if any(x in u for x in ['search', 'inventory']):
+    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+    
+    if 'index.htm' in u or u.endswith('searchnew.aspx') or u.endswith('searchused.aspx') or u.endswith('searchall.aspx'):
         if 'new' in u: return 'New Car Search'
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
         return 'General Search'
-    if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
+        
+    # TRAP FIX: Always check for Year first so /inventory/ URLs don't get mislabeled as Search pages.
     if get_year(u): return 'VDP'
+    
+    if any(x in u for x in ['search', 'inventory', 'vehicles']):
+        if 'new' in u: return 'New Car Search'
+        if 'used' in u or 'preowned' in u: return 'Used Car Search'
+        return 'General Search'
+        
     return 'Other'
 
+# --- THE CLEAN FAST SCANNING ENGINE ---
 def check_universal_status(url, session):
     year = get_year(url)
+    vin = extract_vin(url)
     if not year: return "N/A"
+    
     try:
-        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
-        final_url = response.url.lower()
-        search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm']
-        if any(x in final_url for x in search_indicators) and 'inventory' not in url.lower():
-            response.close()
-            return "SOLD (Hard Redirect)"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
+        response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        
+        # 1. THE FIREWALL TRAP (Transparent Diagnostics)
+        if response.status_code in [403, 406, 429]:
+            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
+            
+        # 2. 404 TRAP
+        if response.status_code in [404, 410]:
+            return "SOLD (404 Error)"
+            
+        # 3. HTTP HARD REDIRECT TRAP
+        orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
+        final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
+        
+        if orig_base != final_base:
+            if vin != "N/A" and vin.lower() not in final_base:
+                return "SOLD (HTTP Redirect)"
+            if year not in final_base:
+                return "SOLD (HTTP Redirect)"
+
         text = response.text 
-        soup = BeautifulSoup(text, 'html.parser')
-        page_title = soup.title.string.strip().lower() if soup.title else ""
-        if year not in page_title and len(page_title) > 5:
+        
+        # 4. CLOUDFLARE "JUST A MOMENT" TRAP
+        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text:
+            return "ERROR (Cloudflare Bot Block)"
+            
+        # 5. META/JS REDIRECT TRAP
+        # Bypasses the HTML visual to see if the background code is forcing a redirect to a search page
+        meta_refresh_match = re.search(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*content=["\']?[^"\'\>]+url=([^"\'>\s]+)["\']?', text, re.IGNORECASE)
+        if meta_refresh_match:
+            meta_url = meta_refresh_match.group(1).lower()
+            if vin != "N/A" and vin.lower() not in meta_url:
+                return "SOLD (Meta Refresh Redirect)"
+                
+        js_redirects = re.findall(r'window\.location\.(?:replace|href|assign)\s*=\s*["\']([^"\'>]+)["\']', text, re.IGNORECASE)
+        for js_url in js_redirects:
+            if vin != "N/A" and vin.lower() not in js_url.lower():
+                return "SOLD (JS Redirect)"
+
+        # 6. SOFT REDIRECT TITLE TRAP
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip().lower() if title_match else ""
+        
+        if 'not found' in page_title or '404' in page_title or 'error' in page_title:
+            return "SOLD (Page Not Found)"
+            
+        search_indicators = ['search', 'results', 'all vehicles', 'inventory']
+        if any(x in page_title for x in search_indicators) and year not in page_title:
             return "SOLD (Soft Redirect)"
+            
         return "Available"
-    except:
+        
+    except requests.exceptions.Timeout:
+        return "ERROR (Timeout)"
+    except requests.exceptions.ConnectionError:
+        return "ERROR (Connection Blocked)"
+    except Exception as e:
         return "Available"
 
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
-# Sidebar: History & Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
         df_raw = pd.read_csv(uploaded_file)
+        
+        url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
+        df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
+        
         df_raw['Category'] = df_raw['Page Url'].apply(categorize)
         vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
         
@@ -382,7 +448,6 @@ if uploaded_file is not None:
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
         vdp_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
@@ -394,10 +459,13 @@ if uploaded_file is not None:
                 
         df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
+        
+        # Ensures that errors don't trigger false positives for the Sold count
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
+        
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
-        df['Type'] = df['Page Url'].apply(lambda x: 'New' if re.search(r'202[5-7]', str(x)) else 'Used')
+        df['Type'] = df['Page Url'].apply(extract_type)
         
         vdp_mask = df['Category'] == 'VDP'
         df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
@@ -405,12 +473,10 @@ if uploaded_file is not None:
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
-        # --- GENERATE UNIQUE ID FOR HISTORY ---
         domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
         report_time = datetime.datetime.now().strftime('%I:%M %p')
         report_id = f"{domain} ({report_time})"
         
-        # Save to Vault
         st.session_state.history[report_id] = df
         st.session_state.current_report_id = report_id
         
@@ -424,14 +490,12 @@ if st.session_state.history:
     
     report_names = list(st.session_state.history.keys())
     
-    # Selectbox to toggle between saved reports
     selected_report = st.sidebar.radio(
         "Select a report to view:", 
         options=report_names, 
         index=report_names.index(st.session_state.current_report_id)
     )
     
-    # If user clicks a different report in history, swap it instantly
     if selected_report != st.session_state.current_report_id:
         st.session_state.current_report_id = selected_report
         st.rerun()
@@ -446,13 +510,16 @@ if st.session_state.history:
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
-    # Pull data from the Vault
     df = st.session_state.history[st.session_state.current_report_id]
     
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    # Metrics
+    # --- FIREWALL DIAGNOSTIC WARNING ---
+    error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
+    if not error_df.empty:
+        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's website firewall actively blocked **{len(error_df)}** of our scanning requests. These vehicles are currently marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
+    
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
     new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
@@ -472,7 +539,6 @@ if st.session_state.current_report_id is not None:
     else:
         missed_df = pd.DataFrame()
 
-    # Executive Summary
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Units Sold", m_units)
