@@ -17,9 +17,9 @@ st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
 # --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
-    st.session_state.history = {} 
+    st.session_state.history = {} # Stores all run reports
 if 'current_report_id' not in st.session_state:
-    st.session_state.current_report_id = None 
+    st.session_state.current_report_id = None # Tracks which one we are looking at
 
 # --- LOGIN ---
 def check_password():
@@ -61,15 +61,12 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     
     col_width = pdf.w / 2.2
     
-    # Row 1
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
     
-    # Row 2
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
     
-    # Row 3 (Sub-metrics)
     pdf.set_font("Arial", "I", 10)
     pdf.cell(col_width, 6, "", border=0) 
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
@@ -81,7 +78,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
-    # Traffic Mix Table
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -96,7 +92,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.ln()
     pdf.ln(5)
 
-    # Sales Mix Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
@@ -118,7 +113,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
             pdf.ln()
         pdf.ln(5)
 
-    # Price Tier Table
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
@@ -240,7 +234,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
-
 # --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
@@ -311,15 +304,12 @@ def get_year(url):
     return match.group(1) if match else None
 
 def extract_vin(url):
-    # Ensures it grabs the exact 17-character VIN, eliminating false positives from trailing slashes
     match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
     if match: return match.group(1)
-    # Fallback for internal stock numbers
     match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
     return match.group(1).upper() if match else "N/A"
 
 def extract_type(url):
-    # Overrides date logic if URL explicitly labels "used" 
     u = str(url).lower()
     if 'used' in u and 'new' not in u: return 'Used'
     if 'new' in u and 'used' not in u: return 'New'
@@ -353,7 +343,6 @@ def categorize(u):
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
         return 'General Search'
         
-    # MUST check year first to catch /inventory/new-2026/ urls correctly
     if get_year(u): return 'VDP'
     
     if any(x in u for x in ['search', 'inventory', 'vehicles']):
@@ -363,16 +352,31 @@ def categorize(u):
         
     return 'Other'
 
+# V6.3 Engine with SPA Fallback Logic
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
+    
     try:
-        response = session.get(url, timeout=3, allow_redirects=True, stream=True)
+        # Send standard browser headers to avoid blocks
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5'
+        }
+        
+        response = session.get(url, headers=headers, timeout=5, allow_redirects=True, stream=True)
+        
+        # 1. 404 Check
+        if response.status_code == 404 or response.status_code == 410:
+            response.close()
+            return "SOLD (404 Error)"
+            
         final_url = response.url.lower()
         original_url = url.lower()
         
-        # 1. HARD REDIRECT CHECK
+        # 2. Hard Redirect Check
         final_clean = final_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
         orig_clean = original_url.replace('https://', '').replace('http://', '').replace('www.', '').strip('/')
         
@@ -384,29 +388,45 @@ def check_universal_status(url, session):
             search_indicators = ['search', 'inventory', 'results', 'all-inventory', 'index.htm', 'new-vehicles', 'used-vehicles']
             if any(x in final_url for x in search_indicators) and len(final_clean) < len(orig_clean) - 10:
                 response.close()
-                return "SOLD (Hard Redirect)"
+                return "SOLD (Hard Redirect to Search)"
 
-        # 2. SOFT REDIRECT / SPA X-RAY CHECK
+        # 3. Text & Title Checks
         text = response.text 
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
+        text_lower = text.lower()
         
+        # Bot Blockers
+        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption']
+        if any(b in page_title for b in bot_titles):
+            return "Available" 
+            
+        # Explicit Page Not Found Text
+        missing_phrases = ["vehicle not found", "no longer available", "this vehicle has been sold", "we couldn't find that vehicle", "is currently out of stock"]
+        if any(phrase in text_lower for phrase in missing_phrases):
+            return "SOLD (Page Indicates Missing)"
+            
+        # Explicit Alive Markers
         if year in page_title:
             return "Available"
-            
-        # X-Ray: If title is generic, scan the raw HTML code for the VIN. 
-        if vin != "N/A" and vin.lower() in text.lower():
+        if vin != "N/A" and vin.lower() in text_lower:
             return "Available"
             
-        return "SOLD (Soft Redirect)"
-    except:
+        # Soft Redirect Title
+        soft_redirect_titles = ['search', 'inventory', 'vehicles for sale', 'all cars', 'not found', 'error']
+        if any(term in page_title for term in soft_redirect_titles):
+            return "SOLD (Soft Redirect)"
+            
+        # SPA Default: If we didn't redirect, didn't 404, and the title is generic, assume it's alive.
+        return "Available"
+        
+    except Exception as e:
         return "Available"
 
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
-# Sidebar: History & Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
@@ -414,7 +434,6 @@ if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
         df_raw = pd.read_csv(uploaded_file)
         
-        # Account for slight column naming variations
         url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
         df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
         
@@ -429,7 +448,6 @@ if uploaded_file is not None:
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'})
         
         vdp_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
@@ -452,12 +470,10 @@ if uploaded_file is not None:
         df['Est. Value'] = df.apply(estimate_value, axis=1)
         df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
         
-        # --- GENERATE UNIQUE ID FOR HISTORY ---
         domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
         report_time = datetime.datetime.now().strftime('%I:%M %p')
         report_id = f"{domain} ({report_time})"
         
-        # Save to Vault
         st.session_state.history[report_id] = df
         st.session_state.current_report_id = report_id
         
