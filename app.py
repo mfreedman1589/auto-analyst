@@ -240,6 +240,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
+# --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
     vehicle_type = str(row['Type']).lower()
@@ -330,17 +331,28 @@ def extract_type(url):
 def clean_name_universal(url):
     year = get_year(url)
     if not year: return "Unknown Vehicle"
-    path = urlparse(url).path.lower()
+    
+    parsed = urlparse(str(url))
+    path_str = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    
     brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi', 'Cadillac', 'Buick', 'Acura', 'Infiniti', 'Lincoln', 'Land Rover', 'Jaguar', 'Porsche', 'Mini']
     make = ""
     for b in brands:
-        if b.lower() in path:
-            make = b
+        if b.lower() in path_str.lower():
+            make = b.title()
             break
-    rest = url.split(year)[-1].replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
+            
+    parts = path_str.split(str(year), 1)
+    rest = parts[-1] if len(parts) > 1 else path_str
+    
+    rest = rest.replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
     tokens = rest.split()
-    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers']
+    
+    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers', 'Suv', 'Truck', 'Coupe', 'Sedan', 'Vehicle', 'Vehicles']
     clean_tokens = [t for t in tokens if not (len(t) > 10 and any(c.isdigit() for c in t)) and t.title() not in junk and t.title() != make]
+    
+    clean_tokens = [t for t in clean_tokens if t != str(year)]
+    
     return f"{year} {make} {' '.join(clean_tokens)}".title().strip()
 
 def categorize(u):
@@ -348,6 +360,10 @@ def categorize(u):
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
     if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
     
+    # THE FIX: Catch specials/offers before the Year check
+    if any(x in u for x in ['incentive', 'offers', 'specials', 'promotions', 'rebate']): 
+        return 'Incentives/Offers'
+        
     if 'index.htm' in u or u.endswith('searchnew.aspx') or u.endswith('searchused.aspx') or u.endswith('searchall.aspx'):
         if 'new' in u: return 'New Car Search'
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
