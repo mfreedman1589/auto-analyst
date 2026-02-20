@@ -311,17 +311,11 @@ def get_year(url):
 
 def extract_vin(url):
     try:
-        # Strip the domain name so we don't accidentally match 17-char domain names
         path = urlparse(str(url)).path.upper().strip('/')
-        
-        # 1. Exact 17-char VIN bounded by hyphens, slashes, or end of string
         match = re.search(r'(?:^|[-/])([A-HJ-NPR-Z0-9]{17})(?:[-/\.]|$)', path)
         if match: return match.group(1)
-        
-        # 2. Fallback: Grab the last block of 10+ alphanumeric characters (for internal Hex IDs/Stock #s)
         blocks = re.findall(r'[A-Z0-9]{10,}', path)
         if blocks: return blocks[-1]
-        
         return "N/A"
     except:
         return "N/A"
@@ -633,6 +627,9 @@ if st.session_state.current_report_id is not None:
             fig3.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig3, use_container_width=True)
 
+    st.divider()
+
+    # --- AGGREGATED TABLES (Side-by-Side) ---
     t1, t2 = st.columns(2)
     with t1:
         if not sold_df.empty:
@@ -644,14 +641,6 @@ if st.session_state.current_report_id is not None:
             if not top_models.empty:
                 st.subheader("🏆 Top Sold Models (Aggregated > 1 Unit)")
                 st.dataframe(top_models, use_container_width=True, hide_index=True)
-                st.divider()
-
-        st.subheader("Top Sold Units (Detail)")
-        if not sold_df.empty:
-            top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-            display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-            display_sold.index += 1
-            st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
         else:
             st.info("No sales identified.")
 
@@ -665,15 +654,25 @@ if st.session_state.current_report_id is not None:
             if not top_missed.empty:
                 st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
                 st.dataframe(top_missed, use_container_width=True, hide_index=True)
-                st.divider()
-
-        st.subheader("Missed Opportunities (Detail)")
-        if not missed_df.empty:
-            display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-            display_missed.index += 1
-            st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
         else:
             st.info("No missed opportunities identified.")
+
+    st.divider()
+
+    # --- DETAILED TABLES (Full Width to prevent scrollbars) ---
+    if not sold_df.empty:
+        st.subheader("📄 Top Sold Units (Detail)")
+        top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_sold.index += 1
+        st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+
+    if not missed_df.empty:
+        st.write("") # Spacer
+        st.subheader("👀 Missed Opportunities (Detail)")
+        display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_missed.index += 1
+        st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
     st.divider()
     st.markdown("### 📥 Export Reports")
