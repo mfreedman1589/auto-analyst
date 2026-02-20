@@ -16,11 +16,26 @@ import os
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# Custom CSS to force the sidebar drag handle to be fully grabbable from top to bottom
+# Advanced UI Tweaks (Sticky Sidebar & Red Button)
 st.markdown("""
     <style>
-        [data-testid="stSidebarResizer"] {
-            height: 100vh !important;
+        /* Makes the Sidebar Close Button float at the top even when scrolling */
+        [data-testid="stSidebarHeader"] {
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 999 !important;
+            background-color: var(--secondary-background-color) !important; 
+        }
+        /* Forces the Primary Run Button to be a bold, eye-catching Red */
+        button[kind="primary"] {
+            background-color: #FF3B30 !important;
+            color: white !important;
+            border: none !important;
+            font-weight: bold !important;
+        }
+        button[kind="primary"]:hover {
+            background-color: #D70015 !important;
+            color: white !important;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -457,11 +472,13 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# The Run button is now placed prominently above the Fix Expander with a divider
+# Sidebar: Prominent Red Run Button
 run_analysis_clicked = False
 if uploaded_file is not None:
-    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", use_container_width=True)
-    st.sidebar.divider()
+    # type="primary" pairs with the custom CSS to make this button RED and FULL WIDTH
+    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
+    
+st.sidebar.divider()
 
 # Sidebar: Cleaned Up Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
