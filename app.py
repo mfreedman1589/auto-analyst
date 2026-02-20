@@ -13,7 +13,7 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Auto-Analyst v7.0 (Sitemap Exploit)", layout="wide")
+st.set_page_config(page_title="Auto-Analyst v7.1 (Advanced Bypass)", layout="wide")
 
 if 'history' not in st.session_state:
     st.session_state.history = {} 
@@ -54,7 +54,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
     pdf.set_font("Arial", "", 12)
     pdf.ln(5)
-    
     col_width = pdf.w / 2.2
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
@@ -128,10 +127,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-        model_counts = sold_models['Model_Only'].value_counts().reset_index()
-        model_counts.columns = ['Make/Model', 'Units Sold']
-        top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
-        
+        top_models = sold_models['Model_Only'].value_counts().reset_index()
+        top_models.columns = ['Make/Model', 'Units Sold']
+        top_models = top_models[top_models['Units Sold'] > 1].head(10)
         if not top_models.empty:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, " 3. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
@@ -180,10 +178,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         if not missed_df.empty:
             missed_models = missed_df.copy()
             missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-            missed_counts = missed_models['Model_Only'].value_counts().reset_index()
-            missed_counts.columns = ['Make/Model', 'Count']
-            top_missed = missed_counts[missed_counts['Count'] > 1].head(10)
-            
+            top_missed = missed_models['Model_Only'].value_counts().reset_index()
+            top_missed.columns = ['Make/Model', 'Count']
+            top_missed = top_missed[top_missed['Count'] > 1].head(10)
             if not top_missed.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Top Missed Models (Aggregated > 1 Unit)", ln=True)
@@ -286,99 +283,104 @@ def categorize(u):
         return 'General Search'
     return 'Other'
 
-# --- THE SITEMAP EXPLOIT ENGINE ---
+# --- THE ADVANCED SITEMAP ENGINE (v7.1) ---
 def fetch_sitemap_vins(base_url, session):
-    """Sneaks into the dealer's backend XML sitemaps to grab all active VINs."""
-    sitemap_endpoints = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-inventory.xml', '/sitemap-vehicles.xml']
     active_vins = set()
+    sitemap_urls = []
+    log = [] # Diagnostic log
     
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+    headers_list = [
+        {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'},
+        {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
+    ]
     
-    for endpoint in sitemap_endpoints:
-        url = base_url.rstrip('/') + endpoint
+    # 1. Ask robots.txt where the sitemap is hidden
+    robots_url = base_url.rstrip('/') + '/robots.txt'
+    for headers in headers_list:
         try:
-            resp = session.get(url, headers=headers, timeout=5)
+            resp = session.get(robots_url, headers=headers, timeout=5)
+            log.append(f"Robots.txt check ({headers['User-Agent'][:20]}): {resp.status_code}")
             if resp.status_code == 200:
-                text = resp.text
-                
-                # If it's a sitemap index, find all sub-sitemaps
-                sub_sitemaps = re.findall(r'<loc>(.*?\.xml)</loc>', text)
-                
-                # If it's a direct inventory sitemap, extract VINs
-                vins_in_text = re.findall(r'([A-HJ-NPR-Z0-9]{17})', text.upper())
-                active_vins.update(vins_in_text)
-
-                # Fetch sub-sitemaps (prioritizing inventory/vehicles)
-                for sub in sub_sitemaps:
-                    if 'inventory' in sub.lower() or 'vehicle' in sub.lower() or 'vdp' in sub.lower():
-                        sub_resp = session.get(sub, headers=headers, timeout=5)
-                        if sub_resp.status_code == 200:
-                            sub_vins = re.findall(r'([A-HJ-NPR-Z0-9]{17})', sub_resp.text.upper())
-                            active_vins.update(sub_vins)
-                
-                if len(active_vins) > 0:
-                    break # We found the motherlode, stop looking
+                matches = re.findall(r'(?i)Sitemap:\s*(https?://[^\s]+)', resp.text)
+                sitemap_urls.extend(matches)
+                if matches: break
         except Exception as e:
-            continue
-            
-    return active_vins
+            log.append(f"Robots.txt error: {e}")
 
-# --- THE STANDARD ENGINE ---
+    # Fallbacks
+    if not sitemap_urls:
+        sitemap_urls = [
+            base_url.rstrip('/') + '/sitemap_index.xml',
+            base_url.rstrip('/') + '/sitemap.xml',
+            base_url.rstrip('/') + '/vehicle-sitemap.xml',
+            base_url.rstrip('/') + '/sitemap-inventory.xml'
+        ]
+    sitemap_urls = list(set(sitemap_urls))
+
+    # 2. Extract VINs from all discovered sitemaps
+    for sitemap_url in sitemap_urls:
+        for headers in headers_list:
+            try:
+                resp = session.get(sitemap_url, headers=headers, timeout=5)
+                log.append(f"Sitemap check {sitemap_url}: {resp.status_code}")
+                if resp.status_code == 200:
+                    text = resp.text
+                    sub_sitemaps = re.findall(r'<loc>(.*?\.xml)</loc>', text)
+                    vins_in_text = re.findall(r'([A-HJ-NPR-Z0-9]{17})', text.upper())
+                    active_vins.update(vins_in_text)
+
+                    # Dive into sub-sitemaps (common on WordPress/DealerInspire)
+                    for sub in sub_sitemaps:
+                        if any(x in sub.lower() for x in ['inventory', 'vehicle', 'vdp', 'car', 'post']):
+                            sub_resp = session.get(sub, headers=headers, timeout=5)
+                            log.append(f"Sub-Sitemap check {sub}: {sub_resp.status_code}")
+                            if sub_resp.status_code == 200:
+                                sub_vins = re.findall(r'([A-HJ-NPR-Z0-9]{17})', sub_resp.text.upper())
+                                active_vins.update(sub_vins)
+                    if len(active_vins) > 0:
+                        return active_vins, log
+            except Exception as e:
+                log.append(f"Sitemap error {sitemap_url}: {e}")
+                
+    return active_vins, log
+
+
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
-    
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
-        
         if response.status_code in [403, 406, 429]: return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
         if response.status_code in [404, 410]: return "SOLD (404 Error)"
-            
         orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
-        
         if orig_base != final_base:
             if vin != "N/A" and vin.lower() not in final_base: return "SOLD (HTTP Redirect)"
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
-        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text:
-            return "ERROR (Cloudflare Bot Block)"
-            
+        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text: return "ERROR (Cloudflare Bot Block)"
         meta_refresh = re.search(r'<meta[^>]*url=([^"\'>\s]+)["\']?', text, re.IGNORECASE)
-        if meta_refresh and vin != "N/A" and vin.lower() not in meta_refresh.group(1).lower():
-            return "SOLD (Meta Refresh Redirect)"
-            
+        if meta_refresh and vin != "N/A" and vin.lower() not in meta_refresh.group(1).lower(): return "SOLD (Meta Refresh Redirect)"
         title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
         page_title = title_match.group(1).strip().lower() if title_match else ""
-        
-        if 'not found' in page_title or '404' in page_title or 'error' in page_title:
-            return "SOLD (Page Not Found)"
-            
+        if 'not found' in page_title or '404' in page_title or 'error' in page_title: return "SOLD (Page Not Found)"
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
-        if any(x in page_title for x in search_indicators) and year not in page_title:
-            return "SOLD (Soft Redirect)"
-            
+        if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
         return "Available"
-        
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
-    except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
 
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent (v7.0)")
-st.caption("Includes Firewall Bypass capabilities for protected dealerships.")
+st.title("🚗 Auto-Sales Intelligence Agent (v7.1)")
 
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-use_sitemap_exploit = st.sidebar.checkbox("🥷 Enable Firewall Bypass (Sitemap Exploit)", value=False, help="Check this if standard scans return '0 Sold' due to a DealerInspire/Cloudflare firewall block.")
+use_sitemap_exploit = st.sidebar.checkbox("🥷 Enable Firewall Bypass (Sitemap Exploit)", value=False, help="Uses robots.txt to find dealer sitemaps and bypass Cloudflare.")
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
@@ -400,18 +402,19 @@ if uploaded_file is not None:
         session.mount('http://', adapter)
         
         vdp_results = {}
+        sitemap_log = []
         
         # --- THE SITEMAP BYPASS BRANCH ---
         if use_sitemap_exploit and len(vdp_urls) > 0:
             parsed_uri = urlparse(vdp_urls[0])
             base_url = '{uri.scheme}://{uri.netloc}/'.format(uri=parsed_uri)
+            st.warning(f"🥷 Firewall Bypass Activated. Analyzing {base_url} robots.txt...")
             
-            st.warning(f"🥷 Firewall Bypass Activated. Searching {base_url} background files for inventory manifest...")
-            
-            active_vins = fetch_sitemap_vins(base_url, session)
+            active_vins, sitemap_log = fetch_sitemap_vins(base_url, session)
+            st.session_state.sitemap_log = sitemap_log # Save log to view later
             
             if len(active_vins) > 0:
-                st.success(f"🔓 Successfully extracted {len(active_vins)} active VINs from dealer backend. Cross-referencing traffic...")
+                st.success(f"🔓 Success! Found {len(active_vins)} active VINs from Dealer Sitemap. Cross-referencing...")
                 for i, url in enumerate(vdp_urls):
                     vin = extract_vin(url)
                     if vin != "N/A":
@@ -420,8 +423,8 @@ if uploaded_file is not None:
                         vdp_results[url] = "ERROR (No VIN in URL)"
                     progress_bar.progress((i + 1) / len(vdp_urls))
             else:
-                st.error("❌ Bypass Failed: Could not locate dealer sitemap. Reverting to standard scan...")
-                use_sitemap_exploit = False # Fallback to standard
+                st.error("❌ Bypass Failed: Cloudflare blocked the Sitemap fetch. Reverting to standard scan...")
+                use_sitemap_exploit = False
                 
         # --- THE STANDARD SCAN BRANCH ---
         if not use_sitemap_exploit:
@@ -436,7 +439,6 @@ if uploaded_file is not None:
         df = df_raw.copy()
         
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
-        
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
         df['Type'] = df['Page Url'].apply(extract_type)
@@ -460,7 +462,6 @@ if uploaded_file is not None:
 if st.session_state.history:
     st.sidebar.divider()
     st.sidebar.markdown("### 📂 Session History")
-    st.sidebar.caption("Reports run during this browser session.")
     
     report_names = list(st.session_state.history.keys())
     selected_report = st.sidebar.radio("Select a report to view:", options=report_names, index=report_names.index(st.session_state.current_report_id))
@@ -479,12 +480,18 @@ if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     df = st.session_state.history[st.session_state.current_report_id]
     
+    # Optional Diagnostic Log View
+    if 'sitemap_log' in st.session_state and st.session_state.sitemap_log:
+        with st.expander("🛠️ View Sitemap Diagnostics Log"):
+            for l in st.session_state.sitemap_log:
+                st.write(l)
+
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's firewall actively blocked **{len(error_df)}** of our scanning requests. Try checking the 'Firewall Bypass' box on your next run!")
+        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's firewall actively blocked **{len(error_df)}** of our requests. The Sold count is likely incomplete.")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
