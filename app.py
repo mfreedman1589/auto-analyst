@@ -21,14 +21,14 @@ if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
 
 # --- THE DEALER API VAULT ---
-# Add known DealerInspire/Algolia keys here so the tool automatically bypasses their firewalls.
+# Add known DealerInspire keys here so the tool automatically bypasses their firewalls.
 DEALER_API_VAULT = {
     'hananiavw.com': {
         'app_id': 'YL5AFXM3DW',
         'api_key': '59d32b7b5842f84284e044c7ca465498',
         'index': 'volkswagenoforangepark-sbm0424_production_inventory'
     },
-    'hondaofsanmarcos.com': {
+    'hondasanmarcos.com': {
         'app_id': 'V3ZOVI2QFZ',
         'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
         'index': 'hondaofsanmarcos_production_inventory'
@@ -241,7 +241,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
-# --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
     vehicle_type = str(row['Type']).lower()
@@ -429,13 +428,13 @@ uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['c
 
 # --- ADVANCED TOOLS SIDEBAR ---
 st.sidebar.markdown("### ⚡ Advanced Tools")
-use_algolia_api = st.sidebar.checkbox("Manually Override API", value=False, help="Only use this if a new dealer is blocked and not yet in the Vault.")
+use_algolia_api = st.sidebar.checkbox("Dealer Inspire Firewall Override", value=False, help="Only use this if a new Dealer Inspire website is blocked and not yet in the Vault.")
 algolia_url = ""
 if use_algolia_api:
-    algolia_url = st.sidebar.text_input("Paste Algolia Query URL from Network Tab:")
+    algolia_url = st.sidebar.text_input("Paste Dealer Inspire Query URL from Network Tab:")
 
 # --- THE TUTORIAL ---
-with st.sidebar.expander("📖 Tutorial: How to bypass a firewall (Find the API)"):
+with st.sidebar.expander("📖 Tutorial: How to bypass a Dealer Inspire firewall"):
     st.markdown("""
     **If a dealer shows a 'Firewall Blocked' error, you can bypass it:**
     1. Open Google Chrome and go to the dealer's **Used Inventory** page.
@@ -443,7 +442,7 @@ with st.sidebar.expander("📖 Tutorial: How to bypass a firewall (Find the API)
     3. At the top of the panel that opens, click the **Network** tab.
     4. Underneath Network, click the **Fetch/XHR** filter.
     5. **Refresh** the web page.
-    6. Look at the list of files. Click on the one named **`query`**, `inventory`, or `graphql`.
+    6. In the file list, look for a file named **`inventory`** or **`query`**. Click on it.
     7. On the right side, look for the **Request URL**. 
     8. Right-click that URL, copy it, and paste it into the box above!
     
@@ -475,15 +474,15 @@ if uploaded_file is not None:
         domain_to_check = urlparse(vdp_urls[0]).netloc.replace('www.', '').lower() if len(vdp_urls) > 0 else ""
         vault_config = DEALER_API_VAULT.get(domain_to_check)
 
-        # --- THE ALGOLIA API WIRETAP BRANCH (Vault or Manual) ---
+        # --- THE API WIRETAP BRANCH (Vault or Manual) ---
         if vault_config or (use_algolia_api and algolia_url):
             if vault_config:
-                st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling API keys from Vault to bypass!")
+                st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling keys from Vault to bypass!")
                 app_id = vault_config['app_id']
                 api_key = vault_config['api_key']
                 index_name = vault_config['index']
             else:
-                st.warning("⚡ Manual API Connect Activated. Bypassing HTML...")
+                st.warning("⚡ Dealer Inspire Override Activated. Bypassing HTML...")
                 app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
                 api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
                 index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
@@ -493,7 +492,7 @@ if uploaded_file is not None:
                     api_key = api_key_match.group(1)
                     index_name = index_match.group(1)
                 else:
-                    st.error("❌ Could not parse valid API credentials from the URL provided. Reverting to standard HTML scan...")
+                    st.error("❌ Could not parse valid credentials from the URL provided. Reverting to standard HTML scan...")
                     app_id = None
             
             if app_id:
@@ -512,16 +511,17 @@ if uploaded_file is not None:
                             resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
                             if resp.status_code == 200:
                                 hits = resp.json().get("nbHits", 0)
-                                vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Database API)"
+                                vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
                             else:
-                                vdp_results[url] = f"ERROR (API Code: {resp.status_code})"
+                                vdp_results[url] = f"ERROR (Database Code: {resp.status_code})"
                         except Exception as e:
-                            vdp_results[url] = "ERROR (API Request Failed)"
+                            vdp_results[url] = "ERROR (Database Request Failed)"
                     else:
                         vdp_results[url] = "ERROR (No VIN in URL)"
                     progress_bar.progress((i + 1) / len(vdp_urls))
         
         # --- THE STANDARD HTML SCAN BRANCH ---
+        # Runs if neither the Vault nor Manual Override apply
         if not vault_config and not (use_algolia_api and algolia_url):
             with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
                 future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
