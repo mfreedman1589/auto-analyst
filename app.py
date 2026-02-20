@@ -16,7 +16,7 @@ import os
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# Advanced UI Tweaks (Sticky Sidebar & Red Button)
+# Advanced UI Tweaks (Sticky Sidebar & Polished Primary Button)
 st.markdown("""
     <style>
         /* Makes the Sidebar Close Button float at the top even when scrolling */
@@ -26,15 +26,21 @@ st.markdown("""
             z-index: 999 !important;
             background-color: var(--secondary-background-color) !important; 
         }
-        /* Forces the Primary Run Button to be a bold, eye-catching Red */
+        /* Forces the Sidebar Resizer to be full height */
+        [data-testid="stSidebarResizer"] {
+            height: 100vh !important;
+        }
+        /* Polished Primary Run Button */
         button[kind="primary"] {
-            background-color: #FF3B30 !important;
+            background-color: #D70015 !important; /* Deep crimson resting state */
             color: white !important;
-            border: none !important;
+            border: 1px solid #A30010 !important; /* Darker border for depth */
             font-weight: bold !important;
+            border-radius: 6px !important;
         }
         button[kind="primary"]:hover {
-            background-color: #D70015 !important;
+            background-color: #FF3B30 !important; /* Bright red light-up on hover */
+            border: 1px solid #D70015 !important;
             color: white !important;
         }
     </style>
@@ -472,15 +478,15 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# Sidebar: Prominent Red Run Button
+# The Run button is now placed prominently above the Fix Expander
 run_analysis_clicked = False
 if uploaded_file is not None:
-    # type="primary" pairs with the custom CSS to make this button RED and FULL WIDTH
+    # type="primary" triggers our custom red button CSS
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     
 st.sidebar.divider()
 
-# Sidebar: Cleaned Up Dealer Inspire Fix UI
+# Sidebar: Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
