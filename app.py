@@ -13,8 +13,9 @@ from fpdf import FPDF
 import io
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Auto-Analyst v7.1 (Advanced Bypass)", layout="wide")
+st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
+# --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
     st.session_state.history = {} 
 if 'current_report_id' not in st.session_state:
@@ -26,7 +27,7 @@ def check_password():
         st.session_state.password_correct = False
     if st.session_state.password_correct:
         return True
-    st.title("🔒 Auto-Analyst Login (Dev)")
+    st.title("🔒 Auto-Analyst Login")
     password = st.text_input("Enter Company Password", type="password")
     if st.button("Log In"):
         if password == "tegna2026": 
@@ -43,6 +44,7 @@ if not check_password():
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
+    
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
@@ -54,14 +56,19 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
     pdf.set_font("Arial", "", 12)
     pdf.ln(5)
+    
     col_width = pdf.w / 2.2
+    
     pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
     pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
+    
     pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
     pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
+    
     pdf.set_font("Arial", "I", 10)
     pdf.cell(col_width, 6, "", border=0) 
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
+    
     pdf.ln(8)
 
     pdf.set_font("Arial", "B", 14)
@@ -127,9 +134,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     if not sold_df.empty:
         sold_models = sold_df.copy()
         sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-        top_models = sold_models['Model_Only'].value_counts().reset_index()
-        top_models.columns = ['Make/Model', 'Units Sold']
-        top_models = top_models[top_models['Units Sold'] > 1].head(10)
+        model_counts = sold_models['Model_Only'].value_counts().reset_index()
+        model_counts.columns = ['Make/Model', 'Units Sold']
+        top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
+        
         if not top_models.empty:
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, " 3. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
@@ -178,9 +186,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         if not missed_df.empty:
             missed_models = missed_df.copy()
             missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-            top_missed = missed_models['Model_Only'].value_counts().reset_index()
-            top_missed.columns = ['Make/Model', 'Count']
-            top_missed = top_missed[top_missed['Count'] > 1].head(10)
+            missed_counts = missed_models['Model_Only'].value_counts().reset_index()
+            missed_counts.columns = ['Make/Model', 'Count']
+            top_missed = missed_counts[missed_counts['Count'] > 1].head(10)
+            
             if not top_missed.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Top Missed Models (Aggregated > 1 Unit)", ln=True)
@@ -283,104 +292,82 @@ def categorize(u):
         return 'General Search'
     return 'Other'
 
-# --- THE ADVANCED SITEMAP ENGINE (v7.1) ---
-def fetch_sitemap_vins(base_url, session):
-    active_vins = set()
-    sitemap_urls = []
-    log = [] # Diagnostic log
-    
-    headers_list = [
-        {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'},
-        {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'}
-    ]
-    
-    # 1. Ask robots.txt where the sitemap is hidden
-    robots_url = base_url.rstrip('/') + '/robots.txt'
-    for headers in headers_list:
-        try:
-            resp = session.get(robots_url, headers=headers, timeout=5)
-            log.append(f"Robots.txt check ({headers['User-Agent'][:20]}): {resp.status_code}")
-            if resp.status_code == 200:
-                matches = re.findall(r'(?i)Sitemap:\s*(https?://[^\s]+)', resp.text)
-                sitemap_urls.extend(matches)
-                if matches: break
-        except Exception as e:
-            log.append(f"Robots.txt error: {e}")
 
-    # Fallbacks
-    if not sitemap_urls:
-        sitemap_urls = [
-            base_url.rstrip('/') + '/sitemap_index.xml',
-            base_url.rstrip('/') + '/sitemap.xml',
-            base_url.rstrip('/') + '/vehicle-sitemap.xml',
-            base_url.rstrip('/') + '/sitemap-inventory.xml'
-        ]
-    sitemap_urls = list(set(sitemap_urls))
-
-    # 2. Extract VINs from all discovered sitemaps
-    for sitemap_url in sitemap_urls:
-        for headers in headers_list:
-            try:
-                resp = session.get(sitemap_url, headers=headers, timeout=5)
-                log.append(f"Sitemap check {sitemap_url}: {resp.status_code}")
-                if resp.status_code == 200:
-                    text = resp.text
-                    sub_sitemaps = re.findall(r'<loc>(.*?\.xml)</loc>', text)
-                    vins_in_text = re.findall(r'([A-HJ-NPR-Z0-9]{17})', text.upper())
-                    active_vins.update(vins_in_text)
-
-                    # Dive into sub-sitemaps (common on WordPress/DealerInspire)
-                    for sub in sub_sitemaps:
-                        if any(x in sub.lower() for x in ['inventory', 'vehicle', 'vdp', 'car', 'post']):
-                            sub_resp = session.get(sub, headers=headers, timeout=5)
-                            log.append(f"Sub-Sitemap check {sub}: {sub_resp.status_code}")
-                            if sub_resp.status_code == 200:
-                                sub_vins = re.findall(r'([A-HJ-NPR-Z0-9]{17})', sub_resp.text.upper())
-                                active_vins.update(sub_vins)
-                    if len(active_vins) > 0:
-                        return active_vins, log
-            except Exception as e:
-                log.append(f"Sitemap error {sitemap_url}: {e}")
-                
-    return active_vins, log
-
-
+# --- THE STANDARD HTML SCANNING ENGINE ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
+    
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+        
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
-        if response.status_code in [403, 406, 429]: return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
-        if response.status_code in [404, 410]: return "SOLD (404 Error)"
+        
+        if response.status_code in [403, 406, 429]:
+            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
+            
+        if response.status_code in [404, 410]:
+            return "SOLD (404 Error)"
+            
         orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
+        
         if orig_base != final_base:
             if vin != "N/A" and vin.lower() not in final_base: return "SOLD (HTTP Redirect)"
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
-        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text: return "ERROR (Cloudflare Bot Block)"
-        meta_refresh = re.search(r'<meta[^>]*url=([^"\'>\s]+)["\']?', text, re.IGNORECASE)
-        if meta_refresh and vin != "N/A" and vin.lower() not in meta_refresh.group(1).lower(): return "SOLD (Meta Refresh Redirect)"
-        title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
-        page_title = title_match.group(1).strip().lower() if title_match else ""
+        soup = BeautifulSoup(text, 'html.parser')
+        page_title = soup.title.string.strip().lower() if soup.title else ""
+        
+        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
+        if any(b in page_title for b in bot_titles): return "ERROR (Cloudflare Bot Block)"
+            
+        meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
+        if meta_refresh and meta_refresh.get('content'):
+            content = meta_refresh['content']
+            match = re.search(r'url=([^"\'>\s]+)', content, re.IGNORECASE)
+            if match:
+                meta_url = match.group(1).lower()
+                if vin != "N/A" and vin.lower() not in meta_url:
+                    return "SOLD (Meta Refresh Redirect)"
+                    
+        js_redirects = re.findall(r'window\.location\.(?:replace|href|assign)\s*=\s*["\']([^"\'>]+)["\']', text, re.IGNORECASE)
+        for js_url in js_redirects:
+            if vin != "N/A" and vin.lower() not in js_url.lower():
+                return "SOLD (JS Redirect)"
+
         if 'not found' in page_title or '404' in page_title or 'error' in page_title: return "SOLD (Page Not Found)"
+            
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
+            
         return "Available"
+        
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
+    except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
 
 
 # --- UI DASHBOARD ---
-st.title("🚗 Auto-Sales Intelligence Agent (v7.1)")
+st.title("🚗 Auto-Sales Intelligence Agent")
 
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-use_sitemap_exploit = st.sidebar.checkbox("🥷 Enable Firewall Bypass (Sitemap Exploit)", value=False, help="Uses robots.txt to find dealer sitemaps and bypass Cloudflare.")
+# --- NEW: ADVANCED TOOLS SIDEBAR ---
+st.sidebar.markdown("### ⚡ Advanced Tools")
+use_algolia_api = st.sidebar.checkbox("Use Algolia Database API", value=False, help="Check this if the dealer uses DealerInspire/Algolia. Bypasses firewalls completely.")
+algolia_url = ""
+if use_algolia_api:
+    algolia_url = st.sidebar.text_input("Paste Algolia Query URL from Network Tab:")
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
@@ -402,32 +389,50 @@ if uploaded_file is not None:
         session.mount('http://', adapter)
         
         vdp_results = {}
-        sitemap_log = []
         
-        # --- THE SITEMAP BYPASS BRANCH ---
-        if use_sitemap_exploit and len(vdp_urls) > 0:
-            parsed_uri = urlparse(vdp_urls[0])
-            base_url = '{uri.scheme}://{uri.netloc}/'.format(uri=parsed_uri)
-            st.warning(f"🥷 Firewall Bypass Activated. Analyzing {base_url} robots.txt...")
+        # --- THE ALGOLIA API WIRETAP BRANCH ---
+        if use_algolia_api and algolia_url:
+            st.warning("⚡ Algolia API Connect Activated. Bypassing HTML and querying dealer database directly...")
             
-            active_vins, sitemap_log = fetch_sitemap_vins(base_url, session)
-            st.session_state.sitemap_log = sitemap_log # Save log to view later
+            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+            index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
             
-            if len(active_vins) > 0:
-                st.success(f"🔓 Success! Found {len(active_vins)} active VINs from Dealer Sitemap. Cross-referencing...")
+            if app_id_match and api_key_match and index_match:
+                app_id = app_id_match.group(1)
+                api_key = api_key_match.group(1)
+                index_name = index_match.group(1)
+                
+                api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+                api_headers = {
+                    "x-algolia-application-id": app_id,
+                    "x-algolia-api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+                
+                st.success(f"🔓 Successfully parsed API Key for Index: {index_name}. Firing queries...")
                 for i, url in enumerate(vdp_urls):
                     vin = extract_vin(url)
                     if vin != "N/A":
-                        vdp_results[url] = "Available" if vin in active_vins else "SOLD (Missing from Sitemap)"
+                        try:
+                            payload = {"params": f"query={vin}"}
+                            resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
+                            if resp.status_code == 200:
+                                hits = resp.json().get("nbHits", 0)
+                                vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Database API)"
+                            else:
+                                vdp_results[url] = f"ERROR (API Code: {resp.status_code})"
+                        except Exception as e:
+                            vdp_results[url] = "ERROR (API Request Failed)"
                     else:
                         vdp_results[url] = "ERROR (No VIN in URL)"
                     progress_bar.progress((i + 1) / len(vdp_urls))
             else:
-                st.error("❌ Bypass Failed: Cloudflare blocked the Sitemap fetch. Reverting to standard scan...")
-                use_sitemap_exploit = False
+                st.error("❌ Could not parse valid Application ID, API Key, or Index from the URL provided. Reverting to standard HTML scan...")
+                use_algolia_api = False
                 
-        # --- THE STANDARD SCAN BRANCH ---
-        if not use_sitemap_exploit:
+        # --- THE STANDARD HTML SCAN BRANCH ---
+        if not use_algolia_api:
             with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
                 future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
                 for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
@@ -480,18 +485,12 @@ if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     df = st.session_state.history[st.session_state.current_report_id]
     
-    # Optional Diagnostic Log View
-    if 'sitemap_log' in st.session_state and st.session_state.sitemap_log:
-        with st.expander("🛠️ View Sitemap Diagnostics Log"):
-            for l in st.session_state.sitemap_log:
-                st.write(l)
-
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's firewall actively blocked **{len(error_df)}** of our requests. The Sold count is likely incomplete.")
+        st.warning(f"⚠️ **Diagnostic Alert:** A website firewall or API error prevented the scanning of **{len(error_df)}** requests. These vehicles are marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
@@ -506,6 +505,12 @@ if st.session_state.current_report_id is not None:
     m_pipe = vdp_df['Est. Value'].sum()
     m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
     
+    if not sold_df.empty:
+        avg_v = sold_df['Attributed Unique Visitors'].mean()
+        missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+    else:
+        missed_df = pd.DataFrame()
+
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Units Sold", m_units)
@@ -557,34 +562,38 @@ if st.session_state.current_report_id is not None:
             display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
             display_sold.index += 1
             st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+        else:
+            st.info("No sales identified.")
 
     with t2:
-        if not sold_df.empty:
-            avg_v = sold_df['Attributed Unique Visitors'].mean()
-            missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
-            if not missed_df.empty:
-                missed_models = missed_df.copy()
-                missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
-                missed_counts = missed_models['Model_Only'].value_counts().reset_index()
-                missed_counts.columns = ['Make/Model', 'Missed Count']
-                top_missed = missed_counts[missed_counts['Missed Count'] > 1].head(10)
-                if not top_missed.empty:
-                    st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
-                    st.dataframe(top_missed, use_container_width=True, hide_index=True)
-                    st.divider()
-                st.subheader("Missed Opportunities (Detail)")
-                display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-                display_missed.index += 1
-                st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+        if not missed_df.empty:
+            missed_models = missed_df.copy()
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            missed_counts = missed_models['Model_Only'].value_counts().reset_index()
+            missed_counts.columns = ['Make/Model', 'Missed Count']
+            top_missed = missed_counts[missed_counts['Missed Count'] > 1].head(10)
+            if not top_missed.empty:
+                st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
+                st.dataframe(top_missed, use_container_width=True, hide_index=True)
+                st.divider()
+
+        st.subheader("Missed Opportunities (Detail)")
+        if not missed_df.empty:
+            display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+            display_missed.index += 1
+            st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+        else:
+            st.info("No missed opportunities identified.")
 
     st.divider()
     st.markdown("### 📥 Export Reports")
+    
     include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF Report?", value=True)
     
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
