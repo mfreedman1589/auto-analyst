@@ -21,7 +21,6 @@ if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
 
 # --- THE DEALER API VAULT ---
-# Add known DealerInspire keys here so the tool automatically bypasses their firewalls.
 DEALER_API_VAULT = {
     'hananiavw.com': {
         'app_id': 'YL5AFXM3DW',
@@ -241,6 +240,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
+# --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
     vehicle_type = str(row['Type']).lower()
@@ -304,15 +304,27 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
+# --- THE SCANNING HELPERS ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def extract_vin(url):
-    match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
-    if match: return match.group(1)
-    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
-    return match.group(1).upper() if match else "N/A"
+    try:
+        # Strip the domain name so we don't accidentally match 17-char domain names
+        path = urlparse(str(url)).path.upper().strip('/')
+        
+        # 1. Exact 17-char VIN bounded by hyphens, slashes, or end of string
+        match = re.search(r'(?:^|[-/])([A-HJ-NPR-Z0-9]{17})(?:[-/\.]|$)', path)
+        if match: return match.group(1)
+        
+        # 2. Fallback: Grab the last block of 10+ alphanumeric characters (for internal Hex IDs/Stock #s)
+        blocks = re.findall(r'[A-Z0-9]{10,}', path)
+        if blocks: return blocks[-1]
+        
+        return "N/A"
+    except:
+        return "N/A"
 
 def extract_type(url):
     u = str(url).lower()
@@ -423,31 +435,20 @@ def check_universal_status(url, session):
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
+# Sidebar: File Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# --- ADVANCED TOOLS SIDEBAR ---
-st.sidebar.markdown("### ⚡ Advanced Tools")
-use_algolia_api = st.sidebar.checkbox("Dealer Inspire Firewall Override", value=False, help="Only use this if a new Dealer Inspire website is blocked and not yet in the Vault.")
-algolia_url = ""
-if use_algolia_api:
-    algolia_url = st.sidebar.text_input("Paste Dealer Inspire Query URL from Network Tab:")
-
-# --- THE TUTORIAL ---
-with st.sidebar.expander("📖 Tutorial: How to bypass a Dealer Inspire firewall"):
-    st.markdown("""
-    **If a dealer shows a 'Firewall Blocked' error, you can bypass it:**
-    1. Open Google Chrome and go to the dealer's **Used Inventory** page.
-    2. Right-click anywhere and click **Inspect**.
-    3. At the top of the panel that opens, click the **Network** tab.
-    4. Underneath Network, click the **Fetch/XHR** filter.
-    5. **Refresh** the web page.
-    6. In the file list, look for a file named **`inventory`** or **`query`**. Click on it.
-    7. On the right side, look for the **Request URL**. 
-    8. Right-click that URL, copy it, and paste it into the box above!
-    
-    *Note: To add this permanently to the tool, send the URL to your Admin to add to the Dealer Vault.*
-    """)
+# Sidebar: Cleaned Up Dealer Inspire Fix UI
+with st.sidebar.expander("🛠️ Dealer Inspire Fix (Firewall Bypass)"):
+    st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
+    use_algolia_api = st.checkbox("Enable Firewall Override", value=False)
+    algolia_url = ""
+    if use_algolia_api:
+        algolia_url = st.text_input("Paste API Query URL here:")
+    st.markdown("---")
+    st.markdown("**How to find the API URL:**")
+    st.markdown("1. Open Chrome and go to the dealer's Used Inventory.\n2. Right-click > **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.")
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
@@ -521,7 +522,6 @@ if uploaded_file is not None:
                     progress_bar.progress((i + 1) / len(vdp_urls))
         
         # --- THE STANDARD HTML SCAN BRANCH ---
-        # Runs if neither the Vault nor Manual Override apply
         if not vault_config and not (use_algolia_api and algolia_url):
             with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
                 future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
@@ -580,7 +580,7 @@ if st.session_state.current_report_id is not None:
     
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"⚠️ **Diagnostic Alert:** A website firewall or API error prevented the scanning of **{len(error_df)}** requests. These vehicles are marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
+        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar to bypass the firewall!*")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
