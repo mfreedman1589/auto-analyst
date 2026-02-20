@@ -11,9 +11,40 @@ from bs4 import BeautifulSoup
 import datetime
 from fpdf import FPDF
 import io
+import os
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
+
+# Advanced UI Tweaks (Sticky Sidebar & Polished Primary Button)
+st.markdown("""
+    <style>
+        /* Makes the Sidebar Close Button float at the top even when scrolling */
+        [data-testid="stSidebarHeader"] {
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 999 !important;
+            background-color: var(--secondary-background-color) !important; 
+        }
+        /* Forces the Sidebar Resizer to be full height */
+        [data-testid="stSidebarResizer"] {
+            height: 100vh !important;
+        }
+        /* Polished Primary Run Button */
+        button[kind="primary"] {
+            background-color: #D70015 !important; /* Deep crimson resting state */
+            color: white !important;
+            border: 1px solid #A30010 !important; /* Darker border for depth */
+            font-weight: bold !important;
+            border-radius: 6px !important;
+        }
+        button[kind="primary"]:hover {
+            background-color: #FF3B30 !important; /* Bright red light-up on hover */
+            border: 1px solid #D70015 !important;
+            color: white !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 if 'history' not in st.session_state:
     st.session_state.history = {} 
@@ -227,17 +258,17 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
              for _, row in missed_df.iterrows():
-                name = str(row['Vehicle Name'])[:35]
-                url = str(row['Page Url'])
-                pdf.set_text_color(0, 0, 255) 
-                pdf.cell(85, 8, name, border=1, link=url)
-                pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 8) 
-                pdf.cell(65, 8, str(row['VIN']), border=1)
-                pdf.set_font("Arial", "", 9)
-                pdf.cell(20, 8, str(row['Type']), border=1)
-                pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
-                pdf.ln()
+                 name = str(row['Vehicle Name'])[:35]
+                 url = str(row['Page Url'])
+                 pdf.set_text_color(0, 0, 255) 
+                 pdf.cell(85, 8, name, border=1, link=url)
+                 pdf.set_text_color(0, 0, 0)
+                 pdf.set_font("Arial", "", 8) 
+                 pdf.cell(65, 8, str(row['VIN']), border=1)
+                 pdf.set_font("Arial", "", 9)
+                 pdf.cell(20, 8, str(row['Type']), border=1)
+                 pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
+                 pdf.ln()
     return bytes(pdf.output())
 
 # --- THE VALUATION ENGINE ---
@@ -360,7 +391,6 @@ def categorize(u):
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
     if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
     
-    # THE FIX: Catch specials/offers before the Year check
     if any(x in u for x in ['incentive', 'offers', 'specials', 'promotions', 'rebate']): 
         return 'Incentives/Offers'
         
@@ -448,119 +478,140 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# Sidebar: Cleaned Up Dealer Inspire Fix UI
+# The Run button is now placed prominently above the Fix Expander
+run_analysis_clicked = False
+if uploaded_file is not None:
+    # type="primary" triggers our custom red button CSS
+    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
+    
+st.sidebar.divider()
+
+# Sidebar: Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
-    use_algolia_api = st.checkbox("Enable Firewall Override", value=False)
+    use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
     algolia_url = ""
     if use_algolia_api:
         algolia_url = st.text_input("Paste API Query URL here:")
     st.markdown("---")
     st.markdown("**How to find the API URL:**")
-    st.markdown("1. Open Chrome and go to the dealer's Used Inventory.\n2. Right-click > **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.")
+    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Check the 'Enable Firewall Fix' box above, paste the URL, and click **🚀 Run Diagnostic Analysis**.")
+    
+    st.markdown("\n*Note: To save time in the future, send this URL to your Admin. They will add it to the backend 'Vault' so this fix happens automatically for this dealer!*")
 
-if uploaded_file is not None:
-    if st.sidebar.button("🚀 Run Diagnostic Analysis"):
-        df_raw = pd.read_csv(uploaded_file)
-        
-        url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
-        df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
-        
-        df_raw['Category'] = df_raw['Page Url'].apply(categorize)
-        vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
-        
-        st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
-        progress_bar = st.progress(0)
-        
-        session = requests.Session()
-        retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
-        session.mount('https://', adapter)
-        session.mount('http://', adapter)
-        
-        vdp_results = {}
-        
-        # --- DEALER VAULT CHECK ---
-        domain_to_check = urlparse(vdp_urls[0]).netloc.replace('www.', '').lower() if len(vdp_urls) > 0 else ""
-        vault_config = DEALER_API_VAULT.get(domain_to_check)
+    pdf_path = "Dealer Inspire URL Steps.pdf"
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+        st.download_button(
+            label="📄 Download Detailed Graphic Guide",
+            data=pdf_bytes,
+            file_name="Dealer_Inspire_URL_Steps.pdf",
+            mime="application/pdf"
+        )
 
-        # --- THE API WIRETAP BRANCH (Vault or Manual) ---
-        if vault_config or (use_algolia_api and algolia_url):
-            if vault_config:
-                st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling keys from Vault to bypass!")
-                app_id = vault_config['app_id']
-                api_key = vault_config['api_key']
-                index_name = vault_config['index']
-            else:
-                st.warning("⚡ Dealer Inspire Override Activated. Bypassing HTML...")
-                app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
-                api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
-                index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
-                
-                if app_id_match and api_key_match and index_match:
-                    app_id = app_id_match.group(1)
-                    api_key = api_key_match.group(1)
-                    index_name = index_match.group(1)
-                else:
-                    st.error("❌ Could not parse valid credentials from the URL provided. Reverting to standard HTML scan...")
-                    app_id = None
+# Main Execution Logic
+if run_analysis_clicked:
+    df_raw = pd.read_csv(uploaded_file)
+    
+    url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
+    df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
+    
+    df_raw['Category'] = df_raw['Page Url'].apply(categorize)
+    vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
+    
+    st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
+    progress_bar = st.progress(0)
+    
+    session = requests.Session()
+    retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    
+    vdp_results = {}
+    
+    # --- DEALER VAULT CHECK ---
+    domain_to_check = urlparse(vdp_urls[0]).netloc.replace('www.', '').lower() if len(vdp_urls) > 0 else ""
+    vault_config = DEALER_API_VAULT.get(domain_to_check)
+
+    # --- THE API WIRETAP BRANCH (Vault or Manual) ---
+    if vault_config or (use_algolia_api and algolia_url):
+        if vault_config:
+            st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling keys from Vault to bypass!")
+            app_id = vault_config['app_id']
+            api_key = vault_config['api_key']
+            index_name = vault_config['index']
+        else:
+            st.warning("⚡ Dealer Inspire Override Activated. Bypassing HTML...")
+            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+            index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
             
-            if app_id:
-                api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
-                api_headers = {
-                    "x-algolia-application-id": app_id,
-                    "x-algolia-api-key": api_key,
-                    "Content-Type": "application/json"
-                }
-                
-                for i, url in enumerate(vdp_urls):
-                    vin = extract_vin(url)
-                    if vin != "N/A":
-                        try:
-                            payload = {"params": f"query={vin}"}
-                            resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
-                            if resp.status_code == 200:
-                                hits = resp.json().get("nbHits", 0)
-                                vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
-                            else:
-                                vdp_results[url] = f"ERROR (Database Code: {resp.status_code})"
-                        except Exception as e:
-                            vdp_results[url] = "ERROR (Database Request Failed)"
-                    else:
-                        vdp_results[url] = "ERROR (No VIN in URL)"
-                    progress_bar.progress((i + 1) / len(vdp_urls))
+            if app_id_match and api_key_match and index_match:
+                app_id = app_id_match.group(1)
+                api_key = api_key_match.group(1)
+                index_name = index_match.group(1)
+            else:
+                st.error("❌ Could not parse valid credentials from the URL provided. Reverting to standard HTML scan...")
+                app_id = None
         
-        # --- THE STANDARD HTML SCAN BRANCH ---
-        if not vault_config and not (use_algolia_api and algolia_url):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-                future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
-                for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
-                    url = future_to_url[future]
-                    vdp_results[url] = future.result()
-                    progress_bar.progress((i + 1) / len(vdp_urls))
-                
-        df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
-        df = df_raw.copy()
-        
-        df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
-        df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
-        df['VIN'] = df['Page Url'].apply(extract_vin)
-        df['Type'] = df['Page Url'].apply(extract_type)
-        
-        vdp_mask = df['Category'] == 'VDP'
-        df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
-        
-        df['Est. Value'] = df.apply(estimate_value, axis=1)
-        df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
-        
-        domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
-        report_time = datetime.datetime.now().strftime('%I:%M %p')
-        report_id = f"{domain} ({report_time})"
-        
-        st.session_state.history[report_id] = df
-        st.session_state.current_report_id = report_id
-        
-        st.rerun()
+        if app_id:
+            api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+            api_headers = {
+                "x-algolia-application-id": app_id,
+                "x-algolia-api-key": api_key,
+                "Content-Type": "application/json"
+            }
+            
+            for i, url in enumerate(vdp_urls):
+                vin = extract_vin(url)
+                if vin != "N/A":
+                    try:
+                        payload = {"params": f"query={vin}"}
+                        resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
+                        if resp.status_code == 200:
+                            hits = resp.json().get("nbHits", 0)
+                            vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
+                        else:
+                            vdp_results[url] = f"ERROR (Database Code: {resp.status_code})"
+                    except Exception as e:
+                        vdp_results[url] = "ERROR (Database Request Failed)"
+                else:
+                    vdp_results[url] = "ERROR (No VIN in URL)"
+                progress_bar.progress((i + 1) / len(vdp_urls))
+    
+    # --- THE STANDARD HTML SCAN BRANCH ---
+    if not vault_config and not (use_algolia_api and algolia_url):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+                url = future_to_url[future]
+                vdp_results[url] = future.result()
+                progress_bar.progress((i + 1) / len(vdp_urls))
+            
+    df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
+    df = df_raw.copy()
+    
+    df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
+    df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
+    df['VIN'] = df['Page Url'].apply(extract_vin)
+    df['Type'] = df['Page Url'].apply(extract_type)
+    
+    vdp_mask = df['Category'] == 'VDP'
+    df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
+    
+    df['Est. Value'] = df.apply(estimate_value, axis=1)
+    df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
+    
+    domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
+    report_time = datetime.datetime.now().strftime('%I:%M %p')
+    report_id = f"{domain} ({report_time})"
+    
+    st.session_state.history[report_id] = df
+    st.session_state.current_report_id = report_id
+    
+    st.rerun()
 
 # --- SIDEBAR: SESSION HISTORY MANAGER ---
 if st.session_state.history:
@@ -589,7 +640,7 @@ if st.session_state.current_report_id is not None:
     
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar to bypass the firewall!*")
+        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
