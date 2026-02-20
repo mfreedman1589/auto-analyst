@@ -9,6 +9,7 @@ import plotly.express as px
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import datetime
+import pytz
 from fpdf import FPDF
 import io
 import os
@@ -89,10 +90,14 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf = FPDF()
     pdf.add_page()
     
+    # Establish Eastern Time
+    eastern = pytz.timezone('US/Eastern')
+    current_time = datetime.datetime.now(eastern)
+    
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
+    pdf.cell(0, 10, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')}", ln=True, align="C")
     pdf.ln(5)
 
     pdf.set_font("Arial", "B", 14)
@@ -318,9 +323,11 @@ def estimate_value(row):
                 break
     if 'new' in vehicle_type:
         return int(baseline)
+    
+    eastern = pytz.timezone('US/Eastern')
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
-    current_year = datetime.datetime.now().year + 1
+    current_year = datetime.datetime.now(eastern).year + 1
     age = current_year - year
     if age <= 0:
         value = baseline
@@ -486,7 +493,7 @@ if uploaded_file is not None:
     
 st.sidebar.divider()
 
-# Sidebar: Dealer Inspire Fix UI
+# Sidebar: Cleaned Up Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
@@ -605,7 +612,10 @@ if run_analysis_clicked:
     df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
     
     domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
-    report_time = datetime.datetime.now().strftime('%I:%M %p')
+    
+    # Generate Eastern Time for the Session History label
+    eastern = pytz.timezone('US/Eastern')
+    report_time = datetime.datetime.now(eastern).strftime('%I:%M %p ET')
     report_id = f"{domain} ({report_time})"
     
     st.session_state.history[report_id] = df
