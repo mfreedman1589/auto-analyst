@@ -15,11 +15,24 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (The Vault) ---
 if 'history' not in st.session_state:
     st.session_state.history = {} 
 if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
+
+# --- THE DEALER API VAULT ---
+DEALER_API_VAULT = {
+    'hananiavw.com': {
+        'app_id': 'YL5AFXM3DW',
+        'api_key': '59d32b7b5842f84284e044c7ca465498',
+        'index': 'volkswagenoforangepark-sbm0424_production_inventory'
+    },
+    'hondasanmarcos.com': {
+        'app_id': 'V3ZOVI2QFZ',
+        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
+        'index': 'hondaofsanmarcos_production_inventory'
+    }
+}
 
 # --- LOGIN ---
 def check_password():
@@ -68,7 +81,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.set_font("Arial", "I", 10)
     pdf.cell(col_width, 6, "", border=0) 
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
-    
     pdf.ln(8)
 
     pdf.set_font("Arial", "B", 14)
@@ -292,20 +304,23 @@ def get_price_tier(price):
     if price < 60000: return "Core ($30k-$60k)"
     return "Premium ($60k+)"
 
-# --- THE SMART CATEGORIZATION ENGINE ---
+# --- THE SCANNING HELPERS ---
 def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
 def extract_vin(url):
-    # Enforces 17-character extraction to avoid trailing slashes or bad stock numbers
-    match = re.search(r'([A-HJ-NPR-Z0-9]{17})', str(url).upper())
-    if match: return match.group(1)
-    match = re.search(r'([a-zA-Z0-9]{10,})(?:\.htm|\.html|/|$|\?)', str(url))
-    return match.group(1).upper() if match else "N/A"
+    try:
+        path = urlparse(str(url)).path.upper().strip('/')
+        match = re.search(r'(?:^|[-/])([A-HJ-NPR-Z0-9]{17})(?:[-/\.]|$)', path)
+        if match: return match.group(1)
+        blocks = re.findall(r'[A-Z0-9]{10,}', path)
+        if blocks: return blocks[-1]
+        return "N/A"
+    except:
+        return "N/A"
 
 def extract_type(url):
-    # Explicit New/Used URL Override (prevents 2025 used cars from being marked New)
     u = str(url).lower()
     if 'used' in u and 'new' not in u: return 'Used'
     if 'new' in u and 'used' not in u: return 'New'
@@ -339,7 +354,6 @@ def categorize(u):
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
         return 'General Search'
         
-    # TRAP FIX: Always check for Year first so /inventory/ URLs don't get mislabeled as Search pages.
     if get_year(u): return 'VDP'
     
     if any(x in u for x in ['search', 'inventory', 'vehicles']):
@@ -349,7 +363,7 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE CLEAN FAST SCANNING ENGINE ---
+# --- THE STANDARD HTML SCANNING ENGINE ---
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
@@ -366,69 +380,69 @@ def check_universal_status(url, session):
         
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
-        # 1. THE FIREWALL TRAP (Transparent Diagnostics)
         if response.status_code in [403, 406, 429]:
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
-        # 2. 404 TRAP
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
             
-        # 3. HTTP HARD REDIRECT TRAP
         orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         
         if orig_base != final_base:
-            if vin != "N/A" and vin.lower() not in final_base:
-                return "SOLD (HTTP Redirect)"
-            if year not in final_base:
-                return "SOLD (HTTP Redirect)"
+            if vin != "N/A" and vin.lower() not in final_base: return "SOLD (HTTP Redirect)"
+            if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
+        soup = BeautifulSoup(text, 'html.parser')
+        page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # 4. CLOUDFLARE "JUST A MOMENT" TRAP
-        if '<title>Just a moment...</title>' in text or 'Cloudflare' in text:
-            return "ERROR (Cloudflare Bot Block)"
+        bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
+        if any(b in page_title for b in bot_titles): return "ERROR (Cloudflare Bot Block)"
             
-        # 5. META/JS REDIRECT TRAP
-        # Bypasses the HTML visual to see if the background code is forcing a redirect to a search page
-        meta_refresh_match = re.search(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*content=["\']?[^"\'\>]+url=([^"\'>\s]+)["\']?', text, re.IGNORECASE)
-        if meta_refresh_match:
-            meta_url = meta_refresh_match.group(1).lower()
-            if vin != "N/A" and vin.lower() not in meta_url:
-                return "SOLD (Meta Refresh Redirect)"
-                
+        meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
+        if meta_refresh and meta_refresh.get('content'):
+            content = meta_refresh['content']
+            match = re.search(r'url=([^"\'>\s]+)', content, re.IGNORECASE)
+            if match:
+                meta_url = match.group(1).lower()
+                if vin != "N/A" and vin.lower() not in meta_url:
+                    return "SOLD (Meta Refresh Redirect)"
+                    
         js_redirects = re.findall(r'window\.location\.(?:replace|href|assign)\s*=\s*["\']([^"\'>]+)["\']', text, re.IGNORECASE)
         for js_url in js_redirects:
             if vin != "N/A" and vin.lower() not in js_url.lower():
                 return "SOLD (JS Redirect)"
 
-        # 6. SOFT REDIRECT TITLE TRAP
-        title_match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
-        page_title = title_match.group(1).strip().lower() if title_match else ""
-        
-        if 'not found' in page_title or '404' in page_title or 'error' in page_title:
-            return "SOLD (Page Not Found)"
+        if 'not found' in page_title or '404' in page_title or 'error' in page_title: return "SOLD (Page Not Found)"
             
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
-        if any(x in page_title for x in search_indicators) and year not in page_title:
-            return "SOLD (Soft Redirect)"
+        if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
         return "Available"
         
-    except requests.exceptions.Timeout:
-        return "ERROR (Timeout)"
-    except requests.exceptions.ConnectionError:
-        return "ERROR (Connection Blocked)"
-    except Exception as e:
-        return "Available"
+    except requests.exceptions.Timeout: return "ERROR (Timeout)"
+    except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
+    except Exception as e: return "Available"
 
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
+# Sidebar: File Upload
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
+
+# Sidebar: Cleaned Up Dealer Inspire Fix UI
+with st.sidebar.expander("🛠️ Dealer Inspire Fix (Firewall Bypass)"):
+    st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
+    use_algolia_api = st.checkbox("Enable Firewall Override", value=False)
+    algolia_url = ""
+    if use_algolia_api:
+        algolia_url = st.text_input("Paste API Query URL here:")
+    st.markdown("---")
+    st.markdown("**How to find the API URL:**")
+    st.markdown("1. Open Chrome and go to the dealer's Used Inventory.\n2. Right-click > **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.")
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
@@ -450,19 +464,70 @@ if uploaded_file is not None:
         session.mount('http://', adapter)
         
         vdp_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
-                url = future_to_url[future]
-                vdp_results[url] = future.result()
-                progress_bar.progress((i + 1) / len(vdp_urls))
+        
+        # --- DEALER VAULT CHECK ---
+        domain_to_check = urlparse(vdp_urls[0]).netloc.replace('www.', '').lower() if len(vdp_urls) > 0 else ""
+        vault_config = DEALER_API_VAULT.get(domain_to_check)
+
+        # --- THE API WIRETAP BRANCH (Vault or Manual) ---
+        if vault_config or (use_algolia_api and algolia_url):
+            if vault_config:
+                st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling keys from Vault to bypass!")
+                app_id = vault_config['app_id']
+                api_key = vault_config['api_key']
+                index_name = vault_config['index']
+            else:
+                st.warning("⚡ Dealer Inspire Override Activated. Bypassing HTML...")
+                app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+                api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+                index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
+                
+                if app_id_match and api_key_match and index_match:
+                    app_id = app_id_match.group(1)
+                    api_key = api_key_match.group(1)
+                    index_name = index_match.group(1)
+                else:
+                    st.error("❌ Could not parse valid credentials from the URL provided. Reverting to standard HTML scan...")
+                    app_id = None
+            
+            if app_id:
+                api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+                api_headers = {
+                    "x-algolia-application-id": app_id,
+                    "x-algolia-api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+                
+                for i, url in enumerate(vdp_urls):
+                    vin = extract_vin(url)
+                    if vin != "N/A":
+                        try:
+                            payload = {"params": f"query={vin}"}
+                            resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
+                            if resp.status_code == 200:
+                                hits = resp.json().get("nbHits", 0)
+                                vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
+                            else:
+                                vdp_results[url] = f"ERROR (Database Code: {resp.status_code})"
+                        except Exception as e:
+                            vdp_results[url] = "ERROR (Database Request Failed)"
+                    else:
+                        vdp_results[url] = "ERROR (No VIN in URL)"
+                    progress_bar.progress((i + 1) / len(vdp_urls))
+        
+        # --- THE STANDARD HTML SCAN BRANCH ---
+        if not vault_config and not (use_algolia_api and algolia_url):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+                future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+                    url = future_to_url[future]
+                    vdp_results[url] = future.result()
+                    progress_bar.progress((i + 1) / len(vdp_urls))
                 
         df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
         df = df_raw.copy()
         
-        # Ensures that errors don't trigger false positives for the Sold count
         df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
-        
         df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
         df['VIN'] = df['Page Url'].apply(extract_vin)
         df['Type'] = df['Page Url'].apply(extract_type)
@@ -486,16 +551,9 @@ if uploaded_file is not None:
 if st.session_state.history:
     st.sidebar.divider()
     st.sidebar.markdown("### 📂 Session History")
-    st.sidebar.caption("Reports run during this browser session.")
     
     report_names = list(st.session_state.history.keys())
-    
-    selected_report = st.sidebar.radio(
-        "Select a report to view:", 
-        options=report_names, 
-        index=report_names.index(st.session_state.current_report_id)
-    )
-    
+    selected_report = st.sidebar.radio("Select a report to view:", options=report_names, index=report_names.index(st.session_state.current_report_id))
     if selected_report != st.session_state.current_report_id:
         st.session_state.current_report_id = selected_report
         st.rerun()
@@ -509,16 +567,14 @@ if st.session_state.history:
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
-    
     df = st.session_state.history[st.session_state.current_report_id]
     
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    # --- FIREWALL DIAGNOSTIC WARNING ---
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"⚠️ **Diagnostic Alert:** The dealer's website firewall actively blocked **{len(error_df)}** of our scanning requests. These vehicles are currently marked as 'Available' to prevent false data, but the Sold count may be incomplete.")
+        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar to bypass the firewall!*")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
@@ -571,6 +627,9 @@ if st.session_state.current_report_id is not None:
             fig3.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig3, use_container_width=True)
 
+    st.divider()
+
+    # --- AGGREGATED TABLES (Side-by-Side) ---
     t1, t2 = st.columns(2)
     with t1:
         if not sold_df.empty:
@@ -582,14 +641,6 @@ if st.session_state.current_report_id is not None:
             if not top_models.empty:
                 st.subheader("🏆 Top Sold Models (Aggregated > 1 Unit)")
                 st.dataframe(top_models, use_container_width=True, hide_index=True)
-                st.divider()
-
-        st.subheader("Top Sold Units (Detail)")
-        if not sold_df.empty:
-            top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-            display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-            display_sold.index += 1
-            st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
         else:
             st.info("No sales identified.")
 
@@ -603,15 +654,25 @@ if st.session_state.current_report_id is not None:
             if not top_missed.empty:
                 st.subheader("⚠️ Top Missed Models (Aggregated > 1 Unit)")
                 st.dataframe(top_missed, use_container_width=True, hide_index=True)
-                st.divider()
-
-        st.subheader("Missed Opportunities (Detail)")
-        if not missed_df.empty:
-            display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
-            display_missed.index += 1
-            st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
         else:
             st.info("No missed opportunities identified.")
+
+    st.divider()
+
+    # --- DETAILED TABLES (Full Width to prevent scrollbars) ---
+    if not sold_df.empty:
+        st.subheader("📄 Top Sold Units (Detail)")
+        top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_sold.index += 1
+        st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
+
+    if not missed_df.empty:
+        st.write("") # Spacer
+        st.subheader("👀 Missed Opportunities (Detail)")
+        display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_missed.index += 1
+        st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
     st.divider()
     st.markdown("### 📥 Export Reports")
