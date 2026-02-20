@@ -240,7 +240,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
                 pdf.ln()
     return bytes(pdf.output())
 
-# --- THE VALUATION ENGINE ---
 def estimate_value(row):
     name = str(row['Vehicle Name']).lower()
     vehicle_type = str(row['Type']).lower()
@@ -434,7 +433,7 @@ st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 # Sidebar: Cleaned Up Dealer Inspire Fix UI
-with st.sidebar.expander("🛠️ Dealer Inspire Fix (Firewall Bypass)"):
+with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     use_algolia_api = st.checkbox("Enable Firewall Override", value=False)
     algolia_url = ""
@@ -682,7 +681,7 @@ if st.session_state.current_report_id is not None:
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
