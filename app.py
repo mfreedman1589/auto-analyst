@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 import datetime
 from fpdf import FPDF
 import io
+import os
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
@@ -331,17 +332,28 @@ def extract_type(url):
 def clean_name_universal(url):
     year = get_year(url)
     if not year: return "Unknown Vehicle"
-    path = urlparse(url).path.lower()
+    
+    parsed = urlparse(str(url))
+    path_str = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    
     brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi', 'Cadillac', 'Buick', 'Acura', 'Infiniti', 'Lincoln', 'Land Rover', 'Jaguar', 'Porsche', 'Mini']
     make = ""
     for b in brands:
-        if b.lower() in path:
-            make = b
+        if b.lower() in path_str.lower():
+            make = b.title()
             break
-    rest = url.split(year)[-1].replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
+            
+    parts = path_str.split(str(year), 1)
+    rest = parts[-1] if len(parts) > 1 else path_str
+    
+    rest = rest.replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
     tokens = rest.split()
-    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers']
+    
+    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers', 'Suv', 'Truck', 'Coupe', 'Sedan', 'Vehicle', 'Vehicles']
     clean_tokens = [t for t in tokens if not (len(t) > 10 and any(c.isdigit() for c in t)) and t.title() not in junk and t.title() != make]
+    
+    clean_tokens = [t for t in clean_tokens if t != str(year)]
+    
     return f"{year} {make} {' '.join(clean_tokens)}".title().strip()
 
 def categorize(u):
@@ -349,6 +361,9 @@ def categorize(u):
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
     if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
     
+    if any(x in u for x in ['incentive', 'offers', 'specials', 'promotions', 'rebate']): 
+        return 'Incentives/Offers'
+        
     if 'index.htm' in u or u.endswith('searchnew.aspx') or u.endswith('searchused.aspx') or u.endswith('searchall.aspx'):
         if 'new' in u: return 'New Car Search'
         if 'used' in u or 'preowned' in u: return 'Used Car Search'
@@ -434,15 +449,29 @@ st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
 # Sidebar: Cleaned Up Dealer Inspire Fix UI
-with st.sidebar.expander("🛠️ Dealer Inspire Fix (Firewall Bypass)"):
+with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
-    use_algolia_api = st.checkbox("Enable Firewall Override", value=False)
+    use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
     algolia_url = ""
     if use_algolia_api:
         algolia_url = st.text_input("Paste API Query URL here:")
     st.markdown("---")
     st.markdown("**How to find the API URL:**")
-    st.markdown("1. Open Chrome and go to the dealer's Used Inventory.\n2. Right-click > **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.")
+    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Check the 'Enable Firewall Fix' box above, paste the URL, and click **🚀 Run Diagnostic Analysis**.")
+    
+    st.markdown("\n*Note: To save time in the future, send this URL to your Admin. They will add it to the backend 'Vault' so this fix happens automatically for this dealer!*")
+
+    # Add the Downloadable PDF Guide
+    pdf_path = "Dealer Inspire URL Steps.pdf"
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+        st.download_button(
+            label="📄 Download Detailed Graphic Guide",
+            data=pdf_bytes,
+            file_name="Dealer_Inspire_URL_Steps.pdf",
+            mime="application/pdf"
+        )
 
 if uploaded_file is not None:
     if st.sidebar.button("🚀 Run Diagnostic Analysis"):
@@ -574,7 +603,7 @@ if st.session_state.current_report_id is not None:
     
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
     if not error_df.empty:
-        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar to bypass the firewall!*")
+        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
@@ -682,7 +711,7 @@ if st.session_state.current_report_id is not None:
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df, include_missed_in_pdf)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
