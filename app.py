@@ -13,8 +13,17 @@ from fpdf import FPDF
 import io
 import os
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
+
+# Custom CSS to force the sidebar drag handle to be fully grabbable from top to bottom
+st.markdown("""
+    <style>
+        [data-testid="stSidebarResizer"] {
+            height: 100vh !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 if 'history' not in st.session_state:
     st.session_state.history = {} 
@@ -228,17 +237,17 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
              for _, row in missed_df.iterrows():
-                name = str(row['Vehicle Name'])[:35]
-                url = str(row['Page Url'])
-                pdf.set_text_color(0, 0, 255) 
-                pdf.cell(85, 8, name, border=1, link=url)
-                pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 8) 
-                pdf.cell(65, 8, str(row['VIN']), border=1)
-                pdf.set_font("Arial", "", 9)
-                pdf.cell(20, 8, str(row['Type']), border=1)
-                pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
-                pdf.ln()
+                 name = str(row['Vehicle Name'])[:35]
+                 url = str(row['Page Url'])
+                 pdf.set_text_color(0, 0, 255) 
+                 pdf.cell(85, 8, name, border=1, link=url)
+                 pdf.set_text_color(0, 0, 0)
+                 pdf.set_font("Arial", "", 8) 
+                 pdf.cell(65, 8, str(row['VIN']), border=1)
+                 pdf.set_font("Arial", "", 9)
+                 pdf.cell(20, 8, str(row['Type']), border=1)
+                 pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
+                 pdf.ln()
     return bytes(pdf.output())
 
 # --- THE VALUATION ENGINE ---
@@ -448,12 +457,13 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# The Run button is now placed prominently above the Fix Expander
+# The Run button is now placed prominently above the Fix Expander with a divider
 run_analysis_clicked = False
 if uploaded_file is not None:
-    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis")
+    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", use_container_width=True)
+    st.sidebar.divider()
 
-# Sidebar: Dealer Inspire Fix UI
+# Sidebar: Cleaned Up Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
