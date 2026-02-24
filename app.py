@@ -33,7 +33,6 @@ if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
 
 # --- THE DEALER API VAULT (Google Sheets Powered) ---
-# We use a fallback dict just in case the Google Sheet isn't connected yet.
 FALLBACK_VAULT = {
     'hananiavw.com': {'app_id': 'YL5AFXM3DW', 'api_key': '59d32b7b5842f84284e044c7ca465498', 'index': 'volkswagenoforangepark-sbm0424_production_inventory'},
     'hondasanmarcos.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'hondaofsanmarcos_production_inventory'},
@@ -48,7 +47,7 @@ FALLBACK_VAULT = {
 def load_vault():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        vault_df = conn.read(worksheet="Sheet1", ttl=60) # Caches for 1 minute
+        vault_df = conn.read(worksheet="Sheet1", ttl=60) 
         vault_dict = {}
         for _, row in vault_df.iterrows():
             domain = str(row.get('Base Domain', '')).strip()
@@ -84,7 +83,7 @@ if not check_password():
     st.stop()
 
 # --- PDF GENERATOR FUNCTION ---
-def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None):
+def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None, include_dealer_details=False):
     pdf = FPDF()
     pdf.add_page()
     
@@ -308,6 +307,109 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                  pdf.cell(20, 8, str(row['Type']), border=1)
                  pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                  pdf.ln()
+                 
+    # --- DEALER DEEP DIVES EXTENSION ---
+    if include_dealer_details and dealer_group is not None and not dealer_group.empty:
+        for dealer in dealer_group['Dealer'].tolist():
+            dealer_sold = sold_df[sold_df['Dealer'] == dealer]
+            dealer_missed = missed_df[missed_df['Dealer'] == dealer]
+            
+            if dealer_sold.empty and dealer_missed.empty:
+                continue 
+                
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 14)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.cell(0, 10, f" Dealership Profile: {dealer}", ln=True, fill=True)
+            pdf.ln(5)
+            
+            if not dealer_sold.empty:
+                d_sold_models = dealer_sold.copy()
+                d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                d_model_counts = d_sold_models['Model_Only'].value_counts().reset_index()
+                d_model_counts.columns = ['Make/Model', 'Units Sold']
+                d_top_models = d_model_counts[d_model_counts['Units Sold'] > 1].head(5)
+                
+                if not d_top_models.empty:
+                    pdf.set_font("Arial", "B", 11)
+                    pdf.cell(0, 10, "Top Sold Models", ln=True)
+                    pdf.set_font("Arial", "B", 10)
+                    pdf.cell(100, 8, "Make/Model", border=1)
+                    pdf.cell(40, 8, "Units Sold", border=1)
+                    pdf.ln()
+                    pdf.set_font("Arial", "", 9)
+                    for _, row in d_top_models.iterrows():
+                        pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                        pdf.cell(40, 8, str(row['Units Sold']), border=1)
+                        pdf.ln()
+                    pdf.ln(5)
+                    
+            if not dealer_missed.empty:
+                d_missed_models = dealer_missed.copy()
+                d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                d_missed_counts = d_missed_models['Model_Only'].value_counts().reset_index()
+                d_missed_counts.columns = ['Make/Model', 'Count']
+                d_top_missed = d_missed_counts[d_missed_counts['Count'] > 1].head(5)
+                
+                if not d_top_missed.empty:
+                    pdf.set_font("Arial", "B", 11)
+                    pdf.cell(0, 10, "Top Missed Models", ln=True)
+                    pdf.set_font("Arial", "B", 10)
+                    pdf.cell(100, 8, "Make/Model", border=1)
+                    pdf.cell(40, 8, "Missed Count", border=1)
+                    pdf.ln()
+                    pdf.set_font("Arial", "", 9)
+                    for _, row in d_top_missed.iterrows():
+                        pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                        pdf.cell(40, 8, str(row['Count']), border=1)
+                        pdf.ln()
+                    pdf.ln(5)
+
+            if not dealer_sold.empty:
+                pdf.set_font("Arial", "B", 11)
+                pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(80, 8, "Vehicle Name", border=1)
+                pdf.cell(25, 8, "Type", border=1)
+                pdf.cell(20, 8, "Visitors", border=1)
+                pdf.cell(65, 8, "VIN", border=1)
+                pdf.ln()
+                d_top_sold = dealer_sold.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                for _, row in d_top_sold.iterrows():
+                    name = str(row['Vehicle Name'])[:35]
+                    pdf.set_font("Arial", "", 9) 
+                    pdf.cell(80, 8, name, border=1)
+                    pdf.cell(25, 8, str(row['Type']), border=1)
+                    pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
+                    pdf.set_font("Arial", "", 8)
+                    pdf.cell(65, 8, str(row['VIN']), border=1)
+                    pdf.ln()
+                pdf.ln(5)
+
+            if not dealer_missed.empty:
+                pdf.set_font("Arial", "B", 11)
+                pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
+                pdf.set_font("Arial", "B", 10)
+                pdf.cell(85, 8, "Vehicle Name (Clickable)", border=1)
+                pdf.cell(65, 8, "VIN", border=1)
+                pdf.cell(20, 8, "Type", border=1)
+                pdf.cell(20, 8, "Visitors", border=1)
+                pdf.ln()
+                d_top_missed_detail = dealer_missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+                pdf.set_font("Arial", "", 9)
+                for _, row in d_top_missed_detail.iterrows():
+                     name = str(row['Vehicle Name'])[:35]
+                     url = str(row['Page Url'])
+                     pdf.set_text_color(0, 0, 255) 
+                     pdf.cell(85, 8, name, border=1, link=url)
+                     pdf.set_text_color(0, 0, 0)
+                     pdf.set_font("Arial", "", 8) 
+                     pdf.cell(65, 8, str(row['VIN']), border=1)
+                     pdf.set_font("Arial", "", 9)
+                     pdf.cell(20, 8, str(row['Type']), border=1)
+                     pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
+                     pdf.ln()
+                 
     return bytes(pdf.output())
 
 # --- THE VALUATION ENGINE ---
@@ -612,10 +714,9 @@ with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
         else:
             try:
                 temp_df = pd.read_csv(uploaded_file)
-                uploaded_file.seek(0) # Reset buffer for standard run
+                uploaded_file.seek(0)
                 url_col = 'Page Url' if 'Page Url' in temp_df.columns else 'Page URL' if 'Page URL' in temp_df.columns else temp_df.columns[0]
                 
-                # Filter out blank lines to accurately count domains
                 temp_df = temp_df.dropna(subset=[url_col])
                 temp_df = temp_df[temp_df[url_col].astype(str).str.strip() != '']
                 
@@ -668,7 +769,6 @@ if run_analysis_clicked:
     url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
     
-    # --- FIX: Drop completely empty rows or un-parsable strings to prevent false "Auto Group" triggers
     df_raw = df_raw.dropna(subset=['Page Url'])
     df_raw = df_raw[df_raw['Page Url'].astype(str).str.strip() != '']
     
@@ -728,8 +828,17 @@ if run_analysis_clicked:
     
     st.rerun()
 
-# --- SIDEBAR: SESSION HISTORY MANAGER ---
+# --- SIDEBAR: SESSION HISTORY & FILTERS ---
 if st.session_state.history:
+    st.sidebar.divider()
+    st.sidebar.markdown("### 🎛️ Attribution Filter")
+    st.sidebar.markdown(
+        "<div style='font-size: 13px; color: #555; margin-bottom: 10px;'>"
+        "<i>💡 <b>Did you know?</b> Industry data (e.g. LotLinx/Cobalt) shows a vehicle typically needs ~30 VDP views to sell. Raising this threshold ensures you only claim sales driven by high-intent engagement.</i></div>", 
+        unsafe_allow_html=True
+    )
+    min_visitors = st.sidebar.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=1, step=1)
+    
     st.sidebar.divider()
     st.sidebar.markdown("### 📂 Session History")
     
@@ -748,36 +857,44 @@ if st.session_state.history:
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
-    df = st.session_state.history[st.session_state.current_report_id]
     
-    sold_df = df[df['Is Sold']]
-    vdp_df = df[df['Category'].str.contains('VDP', na=False)]
+    # 1. Load the raw historical df
+    df = st.session_state.history[st.session_state.current_report_id].copy()
     
+    # 2. FIREWALL TROUBLESHOOTING LOGIC (Using threshold >= 10)
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
         error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
-        affected_dealers = error_df['Dealer'].nunique()
+        total_affected_dealers = error_df['Dealer'].nunique()
         
-        if affected_dealers > 1:
-            st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{affected_dealers}** dealerships actively blocked **{len(error_df)}** of our total scans.\n\n👉 *Please download the Troubleshooting Report below and manually add these domains to the Google Sheet Vault!*")
+        if total_affected_dealers > 1:
             troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
-            troubleshoot_df = troubleshoot_df.sort_values(by='Blocked Pages', ascending=False)
-            troubleshoot_df.rename(columns={'_base_domain': 'Base Domain'}, inplace=True)
+            severe_blocks = troubleshoot_df[troubleshoot_df['Blocked Pages'] >= 10]
             
-            st.download_button(
-                label="📥 Download Troubleshooting Report (CSV)",
-                data=troubleshoot_df.to_csv(index=False),
-                file_name=f"Firewall_Troubleshoot_{st.session_state.current_report_id}.csv",
-                mime="text/csv"
-            )
-        else:
+            if not severe_blocks.empty:
+                severe_count = severe_blocks['Dealer'].nunique()
+                st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{severe_count}** dealerships experienced severe firewall blocks (10+ pages).\n\n👉 *Please download the Troubleshooting Report below and manually add these domains to the Google Sheet Vault!*")
+                severe_blocks = severe_blocks.sort_values(by='Blocked Pages', ascending=False)
+                severe_blocks.rename(columns={'_base_domain': 'Base Domain'}, inplace=True)
+                
+                st.download_button(
+                    label="📥 Download Troubleshooting Report (CSV)",
+                    data=severe_blocks.to_csv(index=False),
+                    file_name=f"Firewall_Troubleshoot_{st.session_state.current_report_id}.csv",
+                    mime="text/csv"
+                )
+        elif total_affected_dealers == 1 and len(error_df) >= 10:
             st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
     
-    new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
+    # 3. APPLY ATTRIBUTION FILTER
+    sold_df = df[(df['Is Sold']) & (df['Attributed Unique Visitors'] >= min_visitors)]
+    vdp_df = df[df['Category'].str.contains('VDP', na=False)]
+    
+    new_vdp_all = vdp_df[vdp_df['Type'] == 'New']
     new_sold = sold_df[sold_df['Type'] == 'New']
     new_ltb = (len(new_sold) / len(new_vdp_all) * 100) if len(new_vdp_all) > 0 else 0
     
-    used_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'Used')]
+    used_vdp_all = vdp_df[vdp_df['Type'] == 'Used']
     used_sold = sold_df[sold_df['Type'] == 'Used']
     used_ltb = (len(used_sold) / len(used_vdp_all) * 100) if len(used_vdp_all) > 0 else 0
     
@@ -786,17 +903,18 @@ if st.session_state.current_report_id is not None:
     m_pipe = vdp_df['Est. Value'].sum()
     m_ltb = (len(sold_df)/len(vdp_df)*100 if len(vdp_df)>0 else 0)
     
+    # Missed Opportunities strictly uses 'Available' status so Unattributed sales don't trigger it
     if not sold_df.empty:
         avg_v = sold_df['Attributed Unique Visitors'].mean()
-        missed_df = df[(~df['Is Sold']) & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
     else:
         missed_df = pd.DataFrame()
 
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Units Sold", m_units)
+    m1.metric("Units Sold (Attributed)", m_units)
     m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
-    m3.metric("Pipeline Value (Active)", f"${m_pipe:,.0f}")
+    m3.metric("Total Pipeline Value", f"${m_pipe:,.0f}")
     m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
 
     st.divider()
@@ -808,19 +926,19 @@ if st.session_state.current_report_id is not None:
         st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Sites)")
         show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
         
-        df['_is_vdp'] = df['Category'].str.contains('VDP', na=False)
-        df['_pipe_val'] = df.apply(lambda r: r['Est. Value'] if r['_is_vdp'] else 0, axis=1)
-        df['_sold_val'] = df.apply(lambda r: r['Est. Value'] if r['Is Sold'] else 0, axis=1)
-        
-        dealer_group = df.groupby('Dealer').agg(
+        # Aggregation respects the global attribution filter
+        t2_base = df.groupby('Dealer').agg(
             Total_Visitors=('Attributed Unique Visitors', 'sum'),
-            VDPs_Shopped=('_is_vdp', 'sum'),
-            Units_Sold=('Is Sold', 'sum'),
-            Est_Rev_Sold=('_sold_val', 'sum'),
-            Pipeline_Value=('_pipe_val', 'sum')
+            VDPs_Shopped=('Category', lambda x: x.str.contains('VDP', na=False).sum()),
+            Pipeline_Value=('Est. Value', lambda x: x[df.loc[x.index, 'Category'].str.contains('VDP', na=False)].sum())
         ).reset_index()
-        df = df.drop(columns=['_is_vdp', '_pipe_val', '_sold_val'])
         
+        t2_sold = sold_df.groupby('Dealer').agg(
+            Units_Sold=('Is Sold', 'count'),
+            Est_Rev_Sold=('Est. Value', 'sum')
+        ).reset_index()
+        
+        dealer_group = t2_base.merge(t2_sold, on='Dealer', how='left').fillna({'Units_Sold': 0, 'Est_Rev_Sold': 0})
         dealer_group = dealer_group[dealer_group['VDPs_Shopped'] > 0]
         
         dealer_group['Look-to-Book (%)'] = dealer_group.apply(
@@ -844,7 +962,7 @@ if st.session_state.current_report_id is not None:
                 fig_traffic = px.bar(dealer_group_export.head(10), x='Dealer', y='Total Visitors', title='Top Dealers by Traffic')
                 st.plotly_chart(fig_traffic, use_container_width=True)
             with cB:
-                fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Units Sold')
+                fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Attributed Sales')
                 st.plotly_chart(fig_sales, use_container_width=True)
                 
             display_group = dealer_group_export.copy()
@@ -855,6 +973,45 @@ if st.session_state.current_report_id is not None:
                 "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%")
             }, use_container_width=True, hide_index=True)
             
+            # --- DEALER DEEP DIVES EXTENSION UI ---
+            st.divider()
+            st.markdown("### 🔍 Individual Dealership Deep Dives")
+            
+            for dealer_name in dealer_group_export['Dealer']:
+                with st.expander(f"🏢 {dealer_name} - Performance Details"):
+                    d_sold = sold_df[sold_df['Dealer'] == dealer_name]
+                    d_missed = df[(df['Dealer'] == dealer_name) & (df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= (avg_v if not sold_df.empty else 1))]
+                    
+                    if d_sold.empty and d_missed.empty:
+                        st.info("No actionable sales or high-interest missed opportunities meet the current thresholds for this dealer.")
+                        continue
+                    
+                    c_left, c_right = st.columns(2)
+                    with c_left:
+                        if not d_sold.empty:
+                            d_sold_models = d_sold.copy()
+                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                            d_m_counts = d_sold_models['Model_Only'].value_counts().reset_index()
+                            d_m_counts.columns = ['Make/Model', 'Units Sold']
+                            st.markdown("**🏆 Top Sold Models**")
+                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
+                    with c_right:
+                        if not d_missed.empty:
+                            d_missed_models = d_missed.copy()
+                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                            d_m_counts = d_missed_models['Model_Only'].value_counts().reset_index()
+                            d_m_counts.columns = ['Make/Model', 'Missed Count']
+                            st.markdown("**⚠️ Top Missed Models**")
+                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
+                    
+                    if not d_sold.empty:
+                        st.markdown("**📄 Top Sold Units (Detail)**")
+                        st.dataframe(d_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
+                    
+                    if not d_missed.empty:
+                        st.markdown("**👀 Missed Opportunities (Detail)**")
+                        st.dataframe(d_missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
+
         st.divider()
     
     c1, c2, c3 = st.columns(3)
@@ -928,12 +1085,18 @@ if st.session_state.current_report_id is not None:
     st.divider()
     st.markdown("### 📥 Export Reports")
     
-    include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF Report?", value=True)
+    e_left, e_right = st.columns(2)
+    with e_left:
+        include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF", value=True)
+    with e_right:
+        include_dealer_details = False
+        if domain_count > 1:
+            include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in PDF", value=False)
     
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export, include_dealer_details)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
