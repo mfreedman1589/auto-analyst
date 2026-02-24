@@ -84,7 +84,51 @@ def check_password():
 
 if not check_password():
     st.stop()
-
+    
+# --- ADMIN DASHBOARD (VAULT GENERATOR) ---
+st.sidebar.divider()
+with st.sidebar.expander("🔐 Admin: Update Dealer Vault"):
+    st.markdown("Upload a Troubleshooting CSV with a new **API URL** column to generate Vault code.")
+    
+    admin_file = st.file_uploader("Upload Vault Update CSV", type=['csv'], key="admin_vault")
+    
+    if admin_file is not None:
+        admin_df = pd.read_csv(admin_file)
+        
+        # Look for the column that contains the URLs
+        url_col = [col for col in admin_df.columns if 'url' in col.lower() or 'api' in col.lower()]
+        
+        if url_col:
+            st.success("✅ API Column Found! Generating Vault Code...")
+            vault_code = ""
+            
+            for _, row in admin_df.iterrows():
+                domain = str(row.get('Base Domain', '')).strip()
+                api_url = str(row[url_col[0]]).strip()
+                
+                if not domain or api_url == 'nan' or not api_url:
+                    continue
+                    
+                # Extract the 3 pieces of Algolia info
+                app_id_match = re.search(r'x-algolia-application-id=([^&]+)', api_url)
+                api_key_match = re.search(r'x-algolia-api-key=([^&]+)', api_url)
+                index_match = re.search(r'/indexes/([^/]+)/query', api_url)
+                
+                if app_id_match and api_key_match and index_match:
+                    vault_code += f"    '{domain}': {{\n"
+                    vault_code += f"        'app_id': '{app_id_match.group(1)}',\n"
+                    vault_code += f"        'api_key': '{api_key_match.group(1)}',\n"
+                    vault_code += f"        'index': '{index_match.group(1)}'\n"
+                    vault_code += f"    }},\n"
+            
+            if vault_code:
+                st.code(vault_code, language='python')
+                st.info("👆 **Copy the code above** and paste it into the `DEALER_API_VAULT` dictionary at the top of your script!")
+            else:
+                st.warning("No valid Algolia API URLs were found in the uploaded file.")
+        else:
+            st.error("Could not find a column containing the API URLs. Please name the new column 'API URL'.")
+            
 # --- PDF GENERATOR FUNCTION ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None):
     pdf = FPDF()
