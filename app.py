@@ -9,6 +9,7 @@ import plotly.express as px
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import datetime
+import pytz
 from fpdf import FPDF
 import io
 import os
@@ -85,14 +86,18 @@ if not check_password():
     st.stop()
 
 # --- PDF GENERATOR FUNCTION ---
-def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
+def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None):
     pdf = FPDF()
     pdf.add_page()
+    
+    # Establish Eastern Time
+    eastern = pytz.timezone('US/Eastern')
+    current_time = datetime.datetime.now(eastern)
     
     pdf.set_font("Arial", "B", 20)
     pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
+    pdf.cell(0, 10, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')}", ln=True, align="C")
     pdf.ln(5)
 
     pdf.set_font("Arial", "B", 14)
@@ -114,8 +119,39 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
     pdf.ln(8)
 
+    # --- TIER 2 / AUTO GROUP INJECTION ---
+    section_offset = 0
+    if dealer_group is not None and not dealer_group.empty:
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, " 2. Auto Group / Tier 2 Breakdown", ln=True, fill=True)
+        pdf.ln(5)
+        
+        pdf.set_font("Arial", "B", 9)
+        pdf.cell(50, 8, "Dealer Name", border=1)
+        pdf.cell(18, 8, "Traffic", border=1)
+        pdf.cell(15, 8, "VDPs", border=1)
+        pdf.cell(15, 8, "Sold", border=1)
+        pdf.cell(15, 8, "LTB", border=1)
+        pdf.cell(35, 8, "Est. Rev Sold", border=1)
+        pdf.cell(35, 8, "Pipeline Value", border=1)
+        pdf.ln()
+        
+        pdf.set_font("Arial", "", 8)
+        for _, row in dealer_group.head(15).iterrows():
+            pdf.cell(50, 8, str(row['Dealer'])[:28], border=1)
+            pdf.cell(18, 8, str(row['Total_Visitors']), border=1)
+            pdf.cell(15, 8, str(row['VDPs_Shopped']), border=1)
+            pdf.cell(15, 8, str(row['Units_Sold']), border=1)
+            pdf.cell(15, 8, f"{row['Look-to-Book (%)']}%", border=1)
+            pdf.cell(35, 8, f"${row['Est. Rev Sold']:,.0f}", border=1)
+            pdf.cell(35, 8, f"${row['Pipeline Value']:,.0f}", border=1)
+            pdf.ln()
+        pdf.ln(8)
+        section_offset = 1
+
+    sec_market = 2 + section_offset
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(0, 10, " 2. Market Insights", ln=True, fill=True)
+    pdf.cell(0, 10, f" {sec_market}. Market Insights", ln=True, fill=True)
     pdf.ln(5)
     
     pdf.set_font("Arial", "B", 11)
@@ -182,8 +218,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
         top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
         
         if not top_models.empty:
+            sec_models = 3 + section_offset
             pdf.set_font("Arial", "B", 14)
-            pdf.cell(0, 10, " 3. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
+            pdf.cell(0, 10, f" {sec_models}. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
             pdf.ln(5)
             pdf.set_font("Arial", "B", 10)
             pdf.cell(100, 8, "Make/Model", border=1)
@@ -222,8 +259,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed):
 
     if include_missed:
         pdf.add_page()
+        sec_missed = 4 + section_offset
         pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, " 4. Missed Opportunities (The Watch List)", ln=True, fill=True)
+        pdf.cell(0, 10, f" {sec_missed}. Missed Opportunities (The Watch List)", ln=True, fill=True)
         pdf.ln(5)
         
         if not missed_df.empty:
@@ -318,9 +356,11 @@ def estimate_value(row):
                 break
     if 'new' in vehicle_type:
         return int(baseline)
+    
+    eastern = pytz.timezone('US/Eastern')
     year_match = re.search(r'\d{4}', name)
     year = int(year_match.group(0)) if year_match else 2025
-    current_year = datetime.datetime.now().year + 1
+    current_year = datetime.datetime.now(eastern).year + 1
     age = current_year - year
     if age <= 0:
         value = baseline
@@ -358,6 +398,15 @@ def extract_type(url):
     if '/used' in u or '-used-' in u or '=used' in u or 'preowned' in u: return 'Used'
     if '/new' in u or '-new-' in u or '=new' in u: return 'New'
     return 'New' if re.search(r'202[5-7]', u) else 'Used'
+
+def extract_dealer_name(url):
+    u = str(url).lower()
+    if not u.startswith('http'):
+        u = 'http://' + u
+    netloc = urlparse(u).netloc
+    netloc = re.sub(r'^(www\.|shop\.|inventory\.|cars\.)', '', netloc)
+    name = netloc.split('.')[0]
+    return name.title()
 
 def clean_name_universal(url):
     year = get_year(url)
@@ -408,7 +457,56 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE STANDARD HTML SCANNING ENGINE ---
+# --- THE SCANNER WRAPPER ENGINE (Seamlessly Integrates HTML & API Vault) ---
+def scan_url(url, session, use_algolia_api, algolia_url):
+    domain_to_check = urlparse(str(url)).netloc.replace('www.', '').lower()
+    vault_config = DEALER_API_VAULT.get(domain_to_check)
+    
+    app_id, api_key, index_name = None, None, None
+    
+    # 1. Check if the specific dealer domain is in the permanent Vault
+    if vault_config:
+        app_id = vault_config['app_id']
+        api_key = vault_config['api_key']
+        index_name = vault_config['index']
+        
+    # 2. Check if the user manually provided an override URL in the sidebar
+    elif use_algolia_api and algolia_url:
+        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+        index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
+        if app_id_match and api_key_match and index_match:
+            app_id = app_id_match.group(1)
+            api_key = api_key_match.group(1)
+            index_name = index_match.group(1)
+            
+    # 3. Execute the API Query (If Vault or Manual Override apply)
+    if app_id:
+        api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+        api_headers = {
+            "x-algolia-application-id": app_id,
+            "x-algolia-api-key": api_key,
+            "Content-Type": "application/json"
+        }
+        vin = extract_vin(url)
+        if vin != "N/A":
+            try:
+                payload = {"params": f"query={vin}"}
+                resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
+                if resp.status_code == 200:
+                    hits = resp.json().get("nbHits", 0)
+                    return "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
+                else:
+                    return f"ERROR (Database Code: {resp.status_code})"
+            except Exception as e:
+                return "ERROR (Database Request Failed)"
+        else:
+            return "ERROR (No VIN in URL)"
+            
+    # 4. Fallback to Standard HTML Scan 
+    else:
+        return check_universal_status(url, session)
+
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
@@ -478,7 +576,7 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# The Run button is now placed prominently above the Fix Expander
+# Sidebar: Prominent Red Run Button
 run_analysis_clicked = False
 if uploaded_file is not None:
     # type="primary" triggers our custom red button CSS
@@ -486,7 +584,7 @@ if uploaded_file is not None:
     
 st.sidebar.divider()
 
-# Sidebar: Dealer Inspire Fix UI
+# Sidebar: Cleaned Up Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
@@ -518,6 +616,8 @@ if run_analysis_clicked:
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
     
     df_raw['Category'] = df_raw['Page Url'].apply(categorize)
+    df_raw['Dealer'] = df_raw['Page Url'].apply(extract_dealer_name) # TIER 2 ADDITION
+    
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
     st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
@@ -531,64 +631,13 @@ if run_analysis_clicked:
     
     vdp_results = {}
     
-    # --- DEALER VAULT CHECK ---
-    domain_to_check = urlparse(vdp_urls[0]).netloc.replace('www.', '').lower() if len(vdp_urls) > 0 else ""
-    vault_config = DEALER_API_VAULT.get(domain_to_check)
-
-    # --- THE API WIRETAP BRANCH (Vault or Manual) ---
-    if vault_config or (use_algolia_api and algolia_url):
-        if vault_config:
-            st.success(f"🔓 Known Firewall Detected for {domain_to_check}. Automatically pulling keys from Vault to bypass!")
-            app_id = vault_config['app_id']
-            api_key = vault_config['api_key']
-            index_name = vault_config['index']
-        else:
-            st.warning("⚡ Dealer Inspire Override Activated. Bypassing HTML...")
-            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
-            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
-            index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
-            
-            if app_id_match and api_key_match and index_match:
-                app_id = app_id_match.group(1)
-                api_key = api_key_match.group(1)
-                index_name = index_match.group(1)
-            else:
-                st.error("❌ Could not parse valid credentials from the URL provided. Reverting to standard HTML scan...")
-                app_id = None
-        
-        if app_id:
-            api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
-            api_headers = {
-                "x-algolia-application-id": app_id,
-                "x-algolia-api-key": api_key,
-                "Content-Type": "application/json"
-            }
-            
-            for i, url in enumerate(vdp_urls):
-                vin = extract_vin(url)
-                if vin != "N/A":
-                    try:
-                        payload = {"params": f"query={vin}"}
-                        resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
-                        if resp.status_code == 200:
-                            hits = resp.json().get("nbHits", 0)
-                            vdp_results[url] = "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
-                        else:
-                            vdp_results[url] = f"ERROR (Database Code: {resp.status_code})"
-                    except Exception as e:
-                        vdp_results[url] = "ERROR (Database Request Failed)"
-                else:
-                    vdp_results[url] = "ERROR (No VIN in URL)"
-                progress_bar.progress((i + 1) / len(vdp_urls))
-    
-    # --- THE STANDARD HTML SCAN BRANCH ---
-    if not vault_config and not (use_algolia_api and algolia_url):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-            future_to_url = {executor.submit(check_universal_status, url, session): url for url in vdp_urls}
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
-                url = future_to_url[future]
-                vdp_results[url] = future.result()
-                progress_bar.progress((i + 1) / len(vdp_urls))
+    # Executing the scan wrap engine multi-threaded
+    with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+        future_to_url = {executor.submit(scan_url, url, session, use_algolia_api, algolia_url): url for url in vdp_urls}
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
+            url = future_to_url[future]
+            vdp_results[url] = future.result()
+            progress_bar.progress((i + 1) / len(vdp_urls))
             
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
@@ -604,9 +653,16 @@ if run_analysis_clicked:
     df['Est. Value'] = df.apply(estimate_value, axis=1)
     df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
     
-    domain = urlparse(vdp_urls[0]).netloc.replace('www.', '').split('.')[0].title() if len(vdp_urls) > 0 else "Unknown_Dealer"
-    report_time = datetime.datetime.now().strftime('%I:%M %p')
-    report_id = f"{domain} ({report_time})"
+    # Establish Tier 2 dynamic naming
+    domain_count = df['Dealer'].nunique()
+    eastern = pytz.timezone('US/Eastern')
+    report_time = datetime.datetime.now(eastern).strftime('%I:%M %p ET')
+
+    if domain_count > 1:
+        report_id = f"Auto Group ({domain_count} Dealers) - {report_time}"
+    else:
+        domain = df['Dealer'].iloc[0] if len(df) > 0 else "Unknown_Dealer"
+        report_id = f"{domain} ({report_time})"
     
     st.session_state.history[report_id] = df
     st.session_state.current_report_id = report_id
@@ -669,6 +725,57 @@ if st.session_state.current_report_id is not None:
     m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
 
     st.divider()
+
+    # --- TIER 2 / AUTO GROUP LOGIC ---
+    domain_count = df['Dealer'].nunique()
+    dealer_group_export = None
+    
+    if domain_count > 1:
+        st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Dealers)")
+        show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
+        
+        # Calculate it so it is available for the PDF Exporter
+        df['_is_vdp'] = df['Category'].str.contains('VDP', na=False)
+        df['_pipe_val'] = df.apply(lambda r: r['Est. Value'] if r['_is_vdp'] else 0, axis=1)
+        df['_sold_val'] = df.apply(lambda r: r['Est. Value'] if r['Is Sold'] else 0, axis=1)
+        
+        dealer_group = df.groupby('Dealer').agg(
+            Total_Visitors=('Attributed Unique Visitors', 'sum'),
+            VDPs_Shopped=('_is_vdp', 'sum'),
+            Units_Sold=('Is Sold', 'sum'),
+            Est_Rev_Sold=('_sold_val', 'sum'),
+            Pipeline_Value=('_pipe_val', 'sum')
+        ).reset_index()
+        df = df.drop(columns=['_is_vdp', '_pipe_val', '_sold_val'])
+        
+        dealer_group['Look-to-Book (%)'] = dealer_group.apply(
+            lambda row: round((row['Units_Sold'] / row['VDPs_Shopped'] * 100), 1) if row['VDPs_Shopped'] > 0 else 0.0,
+            axis=1
+        )
+        
+        dealer_group = dealer_group.rename(columns={
+            'Est_Rev_Sold': 'Est. Rev Sold',
+            'Pipeline_Value': 'Pipeline Value'
+        })
+        
+        dealer_group_export = dealer_group.sort_values('Total_Visitors', ascending=False)
+
+        if show_tier2:
+            cA, cB = st.columns(2)
+            with cA:
+                fig_traffic = px.bar(dealer_group_export.head(10), x='Dealer', y='Total_Visitors', title='Top Dealers by Traffic')
+                st.plotly_chart(fig_traffic, use_container_width=True)
+            with cB:
+                fig_sales = px.bar(dealer_group_export.sort_values('Units_Sold', ascending=False).head(10), x='Dealer', y='Units_Sold', title='Top Dealers by Units Sold')
+                st.plotly_chart(fig_sales, use_container_width=True)
+                
+            st.dataframe(dealer_group_export, column_config={
+                "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                "Est. Rev Sold": st.column_config.NumberColumn("Est. Rev Sold", format="$%d"),
+                "Pipeline Value": st.column_config.NumberColumn("Pipeline Value", format="$%d")
+            }, use_container_width=True, hide_index=True)
+            
+        st.divider()
     
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -729,14 +836,15 @@ if st.session_state.current_report_id is not None:
     if not sold_df.empty:
         st.subheader("📄 Top Sold Units (Detail)")
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-        display_sold = top_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        # Added Dealer name back into the table for context on Auto Group searches
+        display_sold = top_sold[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
         display_sold.index += 1
         st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
     if not missed_df.empty:
         st.write("") # Spacer
         st.subheader("👀 Missed Opportunities (Detail)")
-        display_missed = missed_df[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_missed = missed_df[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
         display_missed.index += 1
         st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
@@ -748,10 +856,10 @@ if st.session_state.current_report_id is not None:
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
-        st.download_button("📥 Download Sold List (CSV)", sold_df[['Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
+        st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex3:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
 
