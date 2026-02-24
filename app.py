@@ -736,9 +736,30 @@ if st.session_state.current_report_id is not None:
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)]
+    # --- UPDATED MULTI-DEALER FIREWALL LOGIC ---
+    error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
-        st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
+        # Extract base domain to allow for precise admin vault updates
+        error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
+        affected_dealers = error_df['Dealer'].nunique()
+        
+        if affected_dealers > 1:
+            st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{affected_dealers}** dealerships actively blocked **{len(error_df)}** of our total scans.\n\n👉 *Please download the Troubleshooting Report below and send it to your Admin to easily add these domains to the backend Vault!*")
+            
+            # Aggregate the block data into a clean CSV layout
+            troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
+            troubleshoot_df = troubleshoot_df.sort_values(by='Blocked Pages', ascending=False)
+            troubleshoot_df.rename(columns={'_base_domain': 'Base Domain'}, inplace=True)
+            
+            st.download_button(
+                label="📥 Download Troubleshooting Report (CSV)",
+                data=troubleshoot_df.to_csv(index=False),
+                file_name=f"Firewall_Troubleshoot_{st.session_state.current_report_id}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
+    # ---------------------------------------------
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
