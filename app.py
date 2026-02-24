@@ -33,14 +33,14 @@ st.markdown("""
         }
         /* Polished Primary Run Button */
         button[kind="primary"] {
-            background-color: #D70015 !important; /* Deep crimson resting state */
+            background-color: #D70015 !important; 
             color: white !important;
-            border: 1px solid #A30010 !important; /* Darker border for depth */
+            border: 1px solid #A30010 !important; 
             font-weight: bold !important;
             border-radius: 6px !important;
         }
         button[kind="primary"]:hover {
-            background-color: #FF3B30 !important; /* Bright red light-up on hover */
+            background-color: #FF3B30 !important; 
             border: 1px solid #D70015 !important;
             color: white !important;
         }
@@ -94,8 +94,14 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     eastern = pytz.timezone('US/Eastern')
     current_time = datetime.datetime.now(eastern)
     
-    pdf.set_font("Arial", "B", 20)
-    pdf.cell(0, 15, "Auto-Sales Intelligence Report", ln=True, align="C")
+    # Use dynamic name for PDF Title if it's a single dealer
+    domain_count = df['Dealer'].nunique()
+    report_title = "Auto-Sales Intelligence Report"
+    if domain_count == 1:
+        report_title = f"{df['Dealer'].iloc[0]} Intelligence Report"
+
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 15, report_title, ln=True, align="C")
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 10, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')}", ln=True, align="C")
     pdf.ln(5)
@@ -139,9 +145,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.set_font("Arial", "", 8)
         for _, row in dealer_group.head(15).iterrows():
             pdf.cell(50, 8, str(row['Dealer'])[:28], border=1)
-            pdf.cell(18, 8, str(row['Total_Visitors']), border=1)
-            pdf.cell(15, 8, str(row['VDPs_Shopped']), border=1)
-            pdf.cell(15, 8, str(row['Units_Sold']), border=1)
+            pdf.cell(18, 8, str(row['Total Visitors']), border=1)
+            pdf.cell(15, 8, str(row['VDPs Shopped']), border=1)
+            pdf.cell(15, 8, str(row['Units Sold']), border=1)
             pdf.cell(15, 8, f"{row['Look-to-Book (%)']}%", border=1)
             pdf.cell(35, 8, f"${row['Est. Rev Sold']:,.0f}", border=1)
             pdf.cell(35, 8, f"${row['Pipeline Value']:,.0f}", border=1)
@@ -399,14 +405,45 @@ def extract_type(url):
     if '/new' in u or '-new-' in u or '=new' in u: return 'New'
     return 'New' if re.search(r'202[5-7]', u) else 'Used'
 
-def extract_dealer_name(url):
+# SMART NAMING ENGINE (Universal for Multi-Dealer Reports)
+def smart_dealer_name(url, is_multi=False):
     u = str(url).lower()
     if not u.startswith('http'):
         u = 'http://' + u
     netloc = urlparse(u).netloc
     netloc = re.sub(r'^(www\.|shop\.|inventory\.|cars\.)', '', netloc)
-    name = netloc.split('.')[0]
-    return name.title()
+    s = netloc.split('.')[0]
+    
+    brands = ['honda', 'toyota', 'ford', 'chevrolet', 'chevy', 'nissan', 'jeep', 'chrysler', 'dodge', 'ram',
+              'hyundai', 'kia', 'vw', 'volkswagen', 'bmw', 'mercedes', 'audi', 'lexus', 'acura',
+              'infiniti', 'subaru', 'mazda', 'volvo', 'porsche', 'buick', 'gmc', 'cadillac', 'lincoln', 'mitsubishi']
+    
+    modifiers = ['of', 'auto', 'group', 'cars', 'motors', 'dealers', 'cares', 'center', 'city', 'town', 'resale', 'classic', 'one', 'mile', 'superstore']
+    
+    for mod in modifiers:
+        s = s.replace(mod, f" {mod} ")
+        
+    brands.sort(key=len, reverse=True)
+    has_brand = False
+    for brand in brands:
+        if brand in s:
+            s = s.replace(brand, f" {brand} ")
+            has_brand = True
+            break 
+            
+    s = re.sub(r'\s+', ' ', s).strip().title()
+    s = s.replace(" Vw", " VW").replace(" Bmw", " BMW").replace(" Gmc", " GMC")
+    
+    # Check if it's a Central Group or Community Site
+    if is_multi and not has_brand:
+        if any(x in s for x in ["Cares", "Community", "Gives"]):
+            s += " (Community)"
+        elif any(x in s for x in ["Resale", "Classic", "Used", "Preowned"]):
+            pass # Name is already descriptive (e.g. Basil Resale)
+        else:
+            s += " (Group/Central Site)"
+            
+    return s
 
 def clean_name_universal(url):
     year = get_year(url)
@@ -616,7 +653,12 @@ if run_analysis_clicked:
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
     
     df_raw['Category'] = df_raw['Page Url'].apply(categorize)
-    df_raw['Dealer'] = df_raw['Page Url'].apply(extract_dealer_name) # TIER 2 ADDITION
+    
+    # Check if this is an Auto Group report (multiple domains)
+    unique_domains = df_raw['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '')).nunique()
+    is_multi_dealer = unique_domains > 1
+    
+    df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
     
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
@@ -653,15 +695,15 @@ if run_analysis_clicked:
     df['Est. Value'] = df.apply(estimate_value, axis=1)
     df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
     
-    # Establish Tier 2 dynamic naming
+    # Establish dynamic naming
     domain_count = df['Dealer'].nunique()
     eastern = pytz.timezone('US/Eastern')
     report_time = datetime.datetime.now(eastern).strftime('%I:%M %p ET')
 
     if domain_count > 1:
-        report_id = f"Auto Group ({domain_count} Dealers) - {report_time}"
+        report_id = f"Auto Group ({domain_count} Sites) - {report_time}"
     else:
-        domain = df['Dealer'].iloc[0] if len(df) > 0 else "Unknown_Dealer"
+        domain = df['Dealer'].iloc[0] if len(df) > 0 else "Unknown Dealer"
         report_id = f"{domain} ({report_time})"
     
     st.session_state.history[report_id] = df
@@ -731,7 +773,7 @@ if st.session_state.current_report_id is not None:
     dealer_group_export = None
     
     if domain_count > 1:
-        st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Dealers)")
+        st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Sites)")
         show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
         
         # Calculate it so it is available for the PDF Exporter
@@ -754,25 +796,31 @@ if st.session_state.current_report_id is not None:
         )
         
         dealer_group = dealer_group.rename(columns={
+            'Total_Visitors': 'Total Visitors',
+            'VDPs_Shopped': 'VDPs Shopped',
+            'Units_Sold': 'Units Sold',
             'Est_Rev_Sold': 'Est. Rev Sold',
             'Pipeline_Value': 'Pipeline Value'
         })
         
-        dealer_group_export = dealer_group.sort_values('Total_Visitors', ascending=False)
+        dealer_group_export = dealer_group.sort_values('Total Visitors', ascending=False)
 
         if show_tier2:
             cA, cB = st.columns(2)
             with cA:
-                fig_traffic = px.bar(dealer_group_export.head(10), x='Dealer', y='Total_Visitors', title='Top Dealers by Traffic')
+                fig_traffic = px.bar(dealer_group_export.head(10), x='Dealer', y='Total Visitors', title='Top Dealers by Traffic')
                 st.plotly_chart(fig_traffic, use_container_width=True)
             with cB:
-                fig_sales = px.bar(dealer_group_export.sort_values('Units_Sold', ascending=False).head(10), x='Dealer', y='Units_Sold', title='Top Dealers by Units Sold')
+                fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Units Sold')
                 st.plotly_chart(fig_sales, use_container_width=True)
                 
-            st.dataframe(dealer_group_export, column_config={
-                "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                "Est. Rev Sold": st.column_config.NumberColumn("Est. Rev Sold", format="$%d"),
-                "Pipeline Value": st.column_config.NumberColumn("Pipeline Value", format="$%d")
+            # Create a string-formatted copy for beautiful comma presentation in the Streamlit dataframe
+            display_group = dealer_group_export.copy()
+            display_group['Est. Rev Sold'] = display_group['Est. Rev Sold'].apply(lambda x: f"${x:,.0f}")
+            display_group['Pipeline Value'] = display_group['Pipeline Value'].apply(lambda x: f"${x:,.0f}")
+            
+            st.dataframe(display_group, column_config={
+                "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%")
             }, use_container_width=True, hide_index=True)
             
         st.divider()
