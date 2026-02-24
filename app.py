@@ -920,7 +920,9 @@ if st.session_state.current_report_id is not None:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex3:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
-st.divider()
+
+    st.divider()
+    
     with st.expander("ℹ️ Glossary & Guide: How to read this report"):
         st.markdown("""
         ### **Definitions & Insights**
@@ -951,5 +953,6 @@ st.divider()
         If your report shows **0 Sold** and triggers a "Firewall Block" alert, the dealer's security (usually Dealer Inspire) blocked our scanner. 
         * *Action:* Use the **Dealer Inspire Fix** in the sidebar. Find the API URL using the included guide and paste it in. The app will automatically save it to our permanent database (Vault) so that dealer never gets blocked again!
         """)
+
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
