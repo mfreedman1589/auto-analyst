@@ -1,12 +1,3 @@
-You make a completely fair point. If the app doesn't automatically overwrite the backend code or save to a permanent database, adding that step just gives you more busywork.
-
-In a standard web-app deployment environment (like Streamlit Community Cloud), the file system resets periodically, which means we can't reliably have the app "save" a file to itself permanently without setting up an external database (like AWS S3 or a SQL database).
-
-Since sending the file to me is highly efficient for your workflow, let's keep it simple! I have removed the "Admin Vault" UI widget entirely and successfully hardcoded all of the Basil Auto Group APIs directly into your `DEALER_API_VAULT`.
-
-Here is the fully updated, clean master code for your application:
-
-```python
 import streamlit as st
 import pandas as pd
 import requests
