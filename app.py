@@ -487,7 +487,7 @@ def categorize(u):
         
     return 'Other'
 
-def scan_url(url, session, use_algolia_api, algolia_url):
+def scan_url(url, session, algolia_url):
     domain_to_check = urlparse(str(url)).netloc.replace('www.', '').lower()
     vault_config = DEALER_API_VAULT.get(domain_to_check)
     
@@ -498,7 +498,7 @@ def scan_url(url, session, use_algolia_api, algolia_url):
         api_key = vault_config['api_key']
         index_name = vault_config['index']
         
-    elif use_algolia_api and algolia_url:
+    elif algolia_url:
         app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
         api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
         index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
@@ -610,28 +610,84 @@ st.sidebar.divider()
 # Sidebar: Cleaned Up Dealer Inspire Fix UI
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
-    use_algolia_api = st.checkbox("Enable Firewall Fix", value=False)
-    algolia_url = ""
-    if use_algolia_api:
-        algolia_url = st.text_input("Paste API Query URL here:")
+    
+    algolia_url = st.text_input("Paste API Query URL here:")
+    
+    if st.button("💾 Save Dealer to Vault", use_container_width=True):
+        if not algolia_url:
+            st.warning("Please paste the URL first!")
+        elif uploaded_file is None:
+            st.warning("Please upload a traffic CSV first to identify the dealer.")
+        else:
+            try:
+                temp_df = pd.read_csv(uploaded_file)
+                uploaded_file.seek(0) # Reset buffer for standard run
+                url_col = 'Page Url' if 'Page Url' in temp_df.columns else 'Page URL' if 'Page URL' in temp_df.columns else temp_df.columns[0]
+                
+                # Filter out blank lines to accurately count domains
+                temp_df = temp_df.dropna(subset=[url_col])
+                temp_df = temp_df[temp_df[url_col].astype(str).str.strip() != '']
+                
+                domains = temp_df[url_col].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower()).unique()
+                domains = [d for d in domains if d]
+                
+                if len(domains) == 1:
+                    target_domain = domains[0]
+                    app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+                    api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+                    index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
+                    
+                    if app_id_match and api_key_match and index_match:
+                        app_id = app_id_match.group(1)
+                        api_key = api_key_match.group(1)
+                        idx_name = index_match.group(1)
+                        
+                        if target_domain not in DEALER_API_VAULT:
+                            try:
+                                new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
+                                if vault_df is not None and gsheets_conn is not None:
+                                    updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                    gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
+                                st.success(f"✅ **Success!** `{target_domain}` was saved to the Vault. You can now run the analysis!")
+                            except Exception as e:
+                                DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
+                                st.success(f"✅ Saved to memory (Google Sheets connect error). Run the analysis!")
+                        else:
+                            st.info(f"ℹ️ `{target_domain}` is already in the Vault.")
+                    else:
+                        st.error("Invalid API URL. Please copy the exact URL from the Network tab.")
+                elif len(domains) > 1:
+                    st.error("Cannot auto-save for multiple domains. Upload a single-dealer report to save.")
+                else:
+                    st.error("No valid domains found in the file.")
+            except Exception as e:
+                st.error("Error reading file.")
+
     st.markdown("---")
     st.markdown("**How to find the API URL:**")
-    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Paste it above and run!")
+    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Paste it above and click **Save Dealer**.")
 
 # Main Execution Logic
 if run_analysis_clicked:
     df_raw = pd.read_csv(uploaded_file)
+    uploaded_file.seek(0)
     
     url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
     
+    # --- FIX: Drop completely empty rows or un-parsable strings to prevent false "Auto Group" triggers
+    df_raw = df_raw.dropna(subset=['Page Url'])
+    df_raw = df_raw[df_raw['Page Url'].astype(str).str.strip() != '']
+    
     df_raw['Category'] = df_raw['Page Url'].apply(categorize)
     
     unique_domains_list = df_raw['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower()).unique()
+    unique_domains_list = [d for d in unique_domains_list if d]
     is_multi_dealer = len(unique_domains_list) > 1
     
-    # --- VAULT AUTO-SAVE AUTOMATION ---
-    if use_algolia_api and algolia_url and gsheets_conn is not None:
+    # --- VAULT AUTO-SAVE (Implicit fallback if they skipped the save button) ---
+    if algolia_url:
         app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
         api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
         index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
@@ -641,22 +697,18 @@ if run_analysis_clicked:
             api_key = api_key_match.group(1)
             idx_name = index_match.group(1)
             
-            # We only auto-save for single-dealer scans to ensure the URL perfectly matches the correct domain.
             if len(unique_domains_list) == 1:
                 target_domain = unique_domains_list[0]
                 if target_domain not in DEALER_API_VAULT:
                     try:
                         new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
-                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                        
-                        # Apply to the live scan
+                        if vault_df is not None and gsheets_conn is not None:
+                            updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                            gsheets_conn.update(worksheet="Sheet1", data=updated_df)
                         DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                        st.sidebar.success(f"✅ **Vault Updated!** `{target_domain}` was saved to Google Sheets. You won't need to do this again for this dealer.")
+                        st.sidebar.success(f"✅ **Vault Updated!** `{target_domain}` was saved to Google Sheets.")
                     except Exception as e:
-                        st.sidebar.warning("API detected, but could not auto-save to Google Sheet. Please check connection.")
-            else:
-                st.sidebar.info("ℹ️ Vault Auto-Save skipped: Please upload single-dealer reports to automatically add them to the Vault.")
+                        DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
 
     df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
@@ -673,7 +725,7 @@ if run_analysis_clicked:
     vdp_results = {}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-        future_to_url = {executor.submit(scan_url, url, session, use_algolia_api, algolia_url): url for url in vdp_urls}
+        future_to_url = {executor.submit(scan_url, url, session, algolia_url): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
             vdp_results[url] = future.result()
