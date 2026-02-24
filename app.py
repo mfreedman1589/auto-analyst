@@ -13,37 +13,17 @@ import pytz
 from fpdf import FPDF
 import io
 import os
+from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
-# Advanced UI Tweaks (Sticky Sidebar & Polished Primary Button)
 st.markdown("""
     <style>
-        /* Makes the Sidebar Close Button float at the top even when scrolling */
-        [data-testid="stSidebarHeader"] {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 999 !important;
-            background-color: var(--secondary-background-color) !important; 
-        }
-        /* Forces the Sidebar Resizer to be full height */
-        [data-testid="stSidebarResizer"] {
-            height: 100vh !important;
-        }
-        /* Polished Primary Run Button */
-        button[kind="primary"] {
-            background-color: #D70015 !important; 
-            color: white !important;
-            border: 1px solid #A30010 !important; 
-            font-weight: bold !important;
-            border-radius: 6px !important;
-        }
-        button[kind="primary"]:hover {
-            background-color: #FF3B30 !important; 
-            border: 1px solid #D70015 !important;
-            color: white !important;
-        }
+        [data-testid="stSidebarHeader"] { position: sticky !important; top: 0 !important; z-index: 999 !important; background-color: var(--secondary-background-color) !important; }
+        [data-testid="stSidebarResizer"] { height: 100vh !important; }
+        button[kind="primary"] { background-color: #D70015 !important; color: white !important; border: 1px solid #A30010 !important; font-weight: bold !important; border-radius: 6px !important; }
+        button[kind="primary"]:hover { background-color: #FF3B30 !important; border: 1px solid #D70015 !important; color: white !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -52,49 +32,37 @@ if 'history' not in st.session_state:
 if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
 
-# --- THE DEALER API VAULT ---
-DEALER_API_VAULT = {
-    'hananiavw.com': {
-        'app_id': 'YL5AFXM3DW',
-        'api_key': '59d32b7b5842f84284e044c7ca465498',
-        'index': 'volkswagenoforangepark-sbm0424_production_inventory'
-    },
-    'hondasanmarcos.com': {
-        'app_id': 'V3ZOVI2QFZ',
-        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
-        'index': 'hondaofsanmarcos_production_inventory'
-    },
-    'basilcars.com': {
-        'app_id': 'V3ZOVI2QFZ',
-        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
-        'index': 'basilautogroup_production_inventory'
-    },
-    'joebasilchevrolet.com': {
-        'app_id': 'V3ZOVI2QFZ',
-        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
-        'index': 'joebasilchevy_production_inventory'
-    },
-    'robertbasilcars.com': {
-        'app_id': 'V3ZOVI2QFZ',
-        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
-        'index': 'robertbasilbuickgmc_production_inventory'
-    },
-    'basilresale.com': {
-        'app_id': 'EHWUW84XVK',
-        'api_key': 'fb58227032e79f03b9b820cbaea7f8fb',
-        'index': 'basilresalesheridan_production_inventory'
-    },
-    'basilmitsubishi.com': {
-        'app_id': 'EQU6HXB6WG',
-        'api_key': 'da97ef494552f47ecc6f47068888d120',
-        'index': 'basilmitsubishi-winback0323_production_inventory'
-    },
-    'basilfredonia.com': {
-        'app_id': 'V3ZOVI2QFZ',
-        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
-        'index': 'basilchevybuick_production_inventory'
-    }
+# --- THE DEALER API VAULT (Google Sheets Powered) ---
+# We use a fallback dict just in case the Google Sheet isn't connected yet.
+FALLBACK_VAULT = {
+    'hananiavw.com': {'app_id': 'YL5AFXM3DW', 'api_key': '59d32b7b5842f84284e044c7ca465498', 'index': 'volkswagenoforangepark-sbm0424_production_inventory'},
+    'hondasanmarcos.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'hondaofsanmarcos_production_inventory'},
+    'basilcars.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'basilautogroup_production_inventory'},
+    'joebasilchevrolet.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'joebasilchevy_production_inventory'},
+    'robertbasilcars.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'robertbasilbuickgmc_production_inventory'},
+    'basilresale.com': {'app_id': 'EHWUW84XVK', 'api_key': 'fb58227032e79f03b9b820cbaea7f8fb', 'index': 'basilresalesheridan_production_inventory'},
+    'basilmitsubishi.com': {'app_id': 'EQU6HXB6WG', 'api_key': 'da97ef494552f47ecc6f47068888d120', 'index': 'basilmitsubishi-winback0323_production_inventory'},
+    'basilfredonia.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'basilchevybuick_production_inventory'}
 }
+
+def load_vault():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        vault_df = conn.read(worksheet="Sheet1", ttl=60) # Caches for 1 minute
+        vault_dict = {}
+        for _, row in vault_df.iterrows():
+            domain = str(row.get('Base Domain', '')).strip()
+            if domain and domain != 'nan':
+                vault_dict[domain] = {
+                    'app_id': str(row.get('App ID', '')).strip(),
+                    'api_key': str(row.get('API Key', '')).strip(),
+                    'index': str(row.get('Index Name', '')).strip()
+                }
+        return vault_dict, vault_df, conn
+    except Exception as e:
+        return FALLBACK_VAULT, None, None
+
+DEALER_API_VAULT, vault_df, gsheets_conn = load_vault()
 
 # --- LOGIN ---
 def check_password():
@@ -120,11 +88,9 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf = FPDF()
     pdf.add_page()
     
-    # Establish Eastern Time
     eastern = pytz.timezone('US/Eastern')
     current_time = datetime.datetime.now(eastern)
     
-    # Use dynamic name for PDF Title if it's a single dealer
     domain_count = df['Dealer'].nunique()
     report_title = "Auto-Sales Intelligence Report"
     if domain_count == 1:
@@ -155,7 +121,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
     pdf.ln(8)
 
-    # --- TIER 2 / AUTO GROUP INJECTION ---
     section_offset = 0
     if dealer_group is not None and not dealer_group.empty:
         pdf.set_font("Arial", "B", 14)
@@ -435,7 +400,6 @@ def extract_type(url):
     if '/new' in u or '-new-' in u or '=new' in u: return 'New'
     return 'New' if re.search(r'202[5-7]', u) else 'Used'
 
-# SMART NAMING ENGINE (Universal for Multi-Dealer Reports)
 def smart_dealer_name(url, is_multi=False):
     u = str(url).lower()
     if not u.startswith('http'):
@@ -464,12 +428,11 @@ def smart_dealer_name(url, is_multi=False):
     s = re.sub(r'\s+', ' ', s).strip().title()
     s = s.replace(" Vw", " VW").replace(" Bmw", " BMW").replace(" Gmc", " GMC")
     
-    # Check if it's a Central Group or Community Site
     if is_multi and not has_brand:
         if any(x in s for x in ["Cares", "Community", "Gives"]):
             s += " (Community)"
         elif any(x in s for x in ["Resale", "Classic", "Used", "Preowned"]):
-            pass # Name is already descriptive (e.g. Basil Resale)
+            pass 
         else:
             s += " (Group/Central Site)"
             
@@ -524,20 +487,17 @@ def categorize(u):
         
     return 'Other'
 
-# --- THE SCANNER WRAPPER ENGINE (Seamlessly Integrates HTML & API Vault) ---
 def scan_url(url, session, use_algolia_api, algolia_url):
     domain_to_check = urlparse(str(url)).netloc.replace('www.', '').lower()
     vault_config = DEALER_API_VAULT.get(domain_to_check)
     
     app_id, api_key, index_name = None, None, None
     
-    # 1. Check if the specific dealer domain is in the permanent Vault
     if vault_config:
         app_id = vault_config['app_id']
         api_key = vault_config['api_key']
         index_name = vault_config['index']
         
-    # 2. Check if the user manually provided an override URL in the sidebar
     elif use_algolia_api and algolia_url:
         app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
         api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
@@ -547,7 +507,6 @@ def scan_url(url, session, use_algolia_api, algolia_url):
             api_key = api_key_match.group(1)
             index_name = index_match.group(1)
             
-    # 3. Execute the API Query (If Vault or Manual Override apply)
     if app_id:
         api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
         api_headers = {
@@ -570,7 +529,6 @@ def scan_url(url, session, use_algolia_api, algolia_url):
         else:
             return "ERROR (No VIN in URL)"
             
-    # 4. Fallback to Standard HTML Scan 
     else:
         return check_universal_status(url, session)
 
@@ -643,10 +601,8 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-# Sidebar: Prominent Red Run Button
 run_analysis_clicked = False
 if uploaded_file is not None:
-    # type="primary" triggers our custom red button CSS
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     
 st.sidebar.divider()
@@ -660,20 +616,7 @@ with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
         algolia_url = st.text_input("Paste API Query URL here:")
     st.markdown("---")
     st.markdown("**How to find the API URL:**")
-    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Check the 'Enable Firewall Fix' box above, paste the URL, and click **🚀 Run Diagnostic Analysis**.")
-    
-    st.markdown("\n*Note: To save time in the future, send this URL to your Admin. They will add it to the backend 'Vault' so this fix happens automatically for this dealer!*")
-
-    pdf_path = "Dealer Inspire URL Steps.pdf"
-    if os.path.exists(pdf_path):
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_bytes = pdf_file.read()
-        st.download_button(
-            label="📄 Download Detailed Graphic Guide",
-            data=pdf_bytes,
-            file_name="Dealer_Inspire_URL_Steps.pdf",
-            mime="application/pdf"
-        )
+    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Paste it above and run!")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -684,12 +627,38 @@ if run_analysis_clicked:
     
     df_raw['Category'] = df_raw['Page Url'].apply(categorize)
     
-    # Check if this is an Auto Group report (multiple domains)
-    unique_domains = df_raw['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '')).nunique()
-    is_multi_dealer = unique_domains > 1
+    unique_domains_list = df_raw['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower()).unique()
+    is_multi_dealer = len(unique_domains_list) > 1
     
+    # --- VAULT AUTO-SAVE AUTOMATION ---
+    if use_algolia_api and algolia_url and gsheets_conn is not None:
+        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
+        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
+        index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
+        
+        if app_id_match and api_key_match and index_match:
+            app_id = app_id_match.group(1)
+            api_key = api_key_match.group(1)
+            idx_name = index_match.group(1)
+            
+            # We only auto-save for single-dealer scans to ensure the URL perfectly matches the correct domain.
+            if len(unique_domains_list) == 1:
+                target_domain = unique_domains_list[0]
+                if target_domain not in DEALER_API_VAULT:
+                    try:
+                        new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
+                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                        
+                        # Apply to the live scan
+                        DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
+                        st.sidebar.success(f"✅ **Vault Updated!** `{target_domain}` was saved to Google Sheets. You won't need to do this again for this dealer.")
+                    except Exception as e:
+                        st.sidebar.warning("API detected, but could not auto-save to Google Sheet. Please check connection.")
+            else:
+                st.sidebar.info("ℹ️ Vault Auto-Save skipped: Please upload single-dealer reports to automatically add them to the Vault.")
+
     df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
-    
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
     st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
@@ -703,7 +672,6 @@ if run_analysis_clicked:
     
     vdp_results = {}
     
-    # Executing the scan wrap engine multi-threaded
     with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
         future_to_url = {executor.submit(scan_url, url, session, use_algolia_api, algolia_url): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
@@ -725,7 +693,6 @@ if run_analysis_clicked:
     df['Est. Value'] = df.apply(estimate_value, axis=1)
     df['Price Tier'] = df['Est. Value'].apply(get_price_tier)
     
-    # Establish dynamic naming
     domain_count = df['Dealer'].nunique()
     eastern = pytz.timezone('US/Eastern')
     report_time = datetime.datetime.now(eastern).strftime('%I:%M %p ET')
@@ -766,17 +733,13 @@ if st.session_state.current_report_id is not None:
     sold_df = df[df['Is Sold']]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
     
-    # --- UPDATED MULTI-DEALER FIREWALL LOGIC ---
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
-        # Extract base domain to allow for precise admin vault updates
         error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
         affected_dealers = error_df['Dealer'].nunique()
         
         if affected_dealers > 1:
-            st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{affected_dealers}** dealerships actively blocked **{len(error_df)}** of our total scans.\n\n👉 *Please download the Troubleshooting Report below and send it to your Admin to easily add these domains to the backend Vault!*")
-            
-            # Aggregate the block data into a clean CSV layout
+            st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{affected_dealers}** dealerships actively blocked **{len(error_df)}** of our total scans.\n\n👉 *Please download the Troubleshooting Report below and manually add these domains to the Google Sheet Vault!*")
             troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
             troubleshoot_df = troubleshoot_df.sort_values(by='Blocked Pages', ascending=False)
             troubleshoot_df.rename(columns={'_base_domain': 'Base Domain'}, inplace=True)
@@ -789,7 +752,6 @@ if st.session_state.current_report_id is not None:
             )
         else:
             st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
-    # ---------------------------------------------
     
     new_vdp_all = df[(df['Category'].str.contains('VDP', na=False)) & (df['Type'] == 'New')]
     new_sold = sold_df[sold_df['Type'] == 'New']
@@ -819,7 +781,6 @@ if st.session_state.current_report_id is not None:
 
     st.divider()
 
-    # --- TIER 2 / AUTO GROUP LOGIC ---
     domain_count = df['Dealer'].nunique()
     dealer_group_export = None
     
@@ -827,7 +788,6 @@ if st.session_state.current_report_id is not None:
         st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Sites)")
         show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
         
-        # Calculate it so it is available for the PDF Exporter
         df['_is_vdp'] = df['Category'].str.contains('VDP', na=False)
         df['_pipe_val'] = df.apply(lambda r: r['Est. Value'] if r['_is_vdp'] else 0, axis=1)
         df['_sold_val'] = df.apply(lambda r: r['Est. Value'] if r['Is Sold'] else 0, axis=1)
@@ -840,6 +800,9 @@ if st.session_state.current_report_id is not None:
             Pipeline_Value=('_pipe_val', 'sum')
         ).reset_index()
         df = df.drop(columns=['_is_vdp', '_pipe_val', '_sold_val'])
+        
+        # --- NEW FILTER: Remove domains with 0 VDPs Shopped ---
+        dealer_group = dealer_group[dealer_group['VDPs_Shopped'] > 0]
         
         dealer_group['Look-to-Book (%)'] = dealer_group.apply(
             lambda row: round((row['Units_Sold'] / row['VDPs_Shopped'] * 100), 1) if row['VDPs_Shopped'] > 0 else 0.0,
@@ -865,7 +828,6 @@ if st.session_state.current_report_id is not None:
                 fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Units Sold')
                 st.plotly_chart(fig_sales, use_container_width=True)
                 
-            # Create a string-formatted copy for beautiful comma presentation in the Streamlit dataframe
             display_group = dealer_group_export.copy()
             display_group['Est. Rev Sold'] = display_group['Est. Rev Sold'].apply(lambda x: f"${x:,.0f}")
             display_group['Pipeline Value'] = display_group['Pipeline Value'].apply(lambda x: f"${x:,.0f}")
@@ -901,7 +863,6 @@ if st.session_state.current_report_id is not None:
 
     st.divider()
 
-    # --- AGGREGATED TABLES (Side-by-Side) ---
     t1, t2 = st.columns(2)
     with t1:
         if not sold_df.empty:
@@ -931,17 +892,15 @@ if st.session_state.current_report_id is not None:
 
     st.divider()
 
-    # --- DETAILED TABLES (Full Width to prevent scrollbars) ---
     if not sold_df.empty:
         st.subheader("📄 Top Sold Units (Detail)")
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
-        # Added Dealer name back into the table for context on Auto Group searches
         display_sold = top_sold[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
         display_sold.index += 1
         st.dataframe(display_sold, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
     if not missed_df.empty:
-        st.write("") # Spacer
+        st.write("") 
         st.subheader("👀 Missed Opportunities (Detail)")
         display_missed = missed_df[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
         display_missed.index += 1
@@ -961,40 +920,36 @@ if st.session_state.current_report_id is not None:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex3:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
-
-    st.divider()
+st.divider()
     with st.expander("ℹ️ Glossary & Guide: How to read this report"):
         st.markdown("""
         ### **Definitions & Insights**
         
         **1. Units Sold**
-        The total count of vehicles that were identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site was actively shopping for cars that moved off the lot.
+        The total count of vehicles identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site actively shopped for cars that moved off the lot.
         
         **2. Estimated Value (Rev & Pipeline)**
         A data-driven approximation of the inventory's dollar value. 
-        * **New Cars:** Calculated using 2025/2026 Base MSRP for the specific model.
-        * **Used Cars:** Calculated using the base MSRP depreciated by age (-15% Yr 1, -10% Yrs 2+).
-        * *Note: This is a directional estimate to gauge "Total Pipeline Power" and does not account for specific trim levels, options, or dealer markups.*
+        * **New Cars:** Calculated using Base MSRP for the specific model.
+        * **Used Cars:** Calculated using the base MSRP depreciated by age.
+        * *Note: This is a directional estimate to gauge "Total Pipeline Power," not accounting for specific trim levels, options, or dealer markups.*
         
         **3. Look-to-Book Ratio (New vs. Used)**
-        The efficiency metric of your inventory. It measures the conversion velocity of the cars we drove traffic to.
+        The efficiency metric of the inventory. It measures the conversion velocity of the cars we drove traffic to.
         * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
-        * *Insight:* We split this by **New** and **Used** because they turn at different rates. A high "Used" LTB with a low "New" LTB often indicates a pricing or merchandising issue on the New car inventory.
+        * *Insight:* We split this by **New** and **Used**. A high "Used" LTB with a low "New" LTB often indicates a pricing or merchandising issue on the New car inventory.
         
-        **4. Top Sold Units**
-        The specific "Sold" vehicles that received the highest volume of exposure from our traffic. This highlights the specific models where our audience demand matched your sales success.
+        **4. Tier 2 / Auto Group Breakdown**
+        Aggregates performance across multiple dealerships if a multi-domain report is uploaded. 
+        * *Clean Reporting:* Dealerships that received general traffic but had **0 VDPs shopped** are automatically filtered out of this table to keep insights focused on high-intent inventory shoppers.
         
-        **5. Missed Opportunities**
-        **"The Watch List."** These are active vehicles receiving **above-average traffic** but haven't sold yet. 
-        * *Why this matters:* You are paying for popularity, but not getting the sale. 
-        * *Action Item:* Audit these VDPs immediately. Check for **missing photos**, **"Call for Price" buttons** (which lower conversion), or **pricing outliers**. These units are "High Interest" and likely just need a small nudge to sell.
+        **5. Top Sold Units & Missed Opportunities ("The Watch List")**
+        * **Top Sold:** The specific vehicles that received the highest exposure and subsequently sold.
+        * **Missed Opportunities:** Active vehicles receiving **above-average traffic** that haven't sold yet. Audit these VDPs immediately for missing photos, "Call for Price" buttons, or pricing outliers!
         
-        **6. Traffic Mix**
-        A breakdown of where our audience lands and navigates.
-        * **VDP (Vehicle Detail Page):** The "Money Page." High VDP traffic proves the audience is "Deep Funnel"—shopping for specific VINs rather than just browsing.
-        * **Service/Parts:** Captures fixed-ops intent.
-        * **New vs. Used:** Helps align your marketing spend with actual inventory interest.
+        **6. Firewall Blocks & Troubleshooting**
+        If your report shows **0 Sold** and triggers a "Firewall Block" alert, the dealer's security (usually Dealer Inspire) blocked our scanner. 
+        * *Action:* Use the **Dealer Inspire Fix** in the sidebar. Find the API URL using the included guide and paste it in. The app will automatically save it to our permanent database (Vault) so that dealer never gets blocked again!
         """)
-
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
