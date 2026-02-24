@@ -1,3 +1,12 @@
+You make a completely fair point. If the app doesn't automatically overwrite the backend code or save to a permanent database, adding that step just gives you more busywork.
+
+In a standard web-app deployment environment (like Streamlit Community Cloud), the file system resets periodically, which means we can't reliably have the app "save" a file to itself permanently without setting up an external database (like AWS S3 or a SQL database).
+
+Since sending the file to me is highly efficient for your workflow, let's keep it simple! I have removed the "Admin Vault" UI widget entirely and successfully hardcoded all of the Basil Auto Group APIs directly into your `DEALER_API_VAULT`.
+
+Here is the fully updated, clean master code for your application:
+
+```python
 import streamlit as st
 import pandas as pd
 import requests
@@ -63,6 +72,36 @@ DEALER_API_VAULT = {
         'app_id': 'V3ZOVI2QFZ',
         'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
         'index': 'hondaofsanmarcos_production_inventory'
+    },
+    'basilcars.com': {
+        'app_id': 'V3ZOVI2QFZ',
+        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
+        'index': 'basilautogroup_production_inventory'
+    },
+    'joebasilchevrolet.com': {
+        'app_id': 'V3ZOVI2QFZ',
+        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
+        'index': 'joebasilchevy_production_inventory'
+    },
+    'robertbasilcars.com': {
+        'app_id': 'V3ZOVI2QFZ',
+        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
+        'index': 'robertbasilbuickgmc_production_inventory'
+    },
+    'basilresale.com': {
+        'app_id': 'EHWUW84XVK',
+        'api_key': 'fb58227032e79f03b9b820cbaea7f8fb',
+        'index': 'basilresalesheridan_production_inventory'
+    },
+    'basilmitsubishi.com': {
+        'app_id': 'EQU6HXB6WG',
+        'api_key': 'da97ef494552f47ecc6f47068888d120',
+        'index': 'basilmitsubishi-winback0323_production_inventory'
+    },
+    'basilfredonia.com': {
+        'app_id': 'V3ZOVI2QFZ',
+        'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3',
+        'index': 'basilchevybuick_production_inventory'
     }
 }
 
@@ -84,51 +123,7 @@ def check_password():
 
 if not check_password():
     st.stop()
-    
-# --- ADMIN DASHBOARD (VAULT GENERATOR) ---
-st.sidebar.divider()
-with st.sidebar.expander("🔐 Admin: Update Dealer Vault"):
-    st.markdown("Upload a Troubleshooting CSV with a new **API URL** column to generate Vault code.")
-    
-    admin_file = st.file_uploader("Upload Vault Update CSV", type=['csv'], key="admin_vault")
-    
-    if admin_file is not None:
-        admin_df = pd.read_csv(admin_file)
-        
-        # Look for the column that contains the URLs
-        url_col = [col for col in admin_df.columns if 'url' in col.lower() or 'api' in col.lower()]
-        
-        if url_col:
-            st.success("✅ API Column Found! Generating Vault Code...")
-            vault_code = ""
-            
-            for _, row in admin_df.iterrows():
-                domain = str(row.get('Base Domain', '')).strip()
-                api_url = str(row[url_col[0]]).strip()
-                
-                if not domain or api_url == 'nan' or not api_url:
-                    continue
-                    
-                # Extract the 3 pieces of Algolia info
-                app_id_match = re.search(r'x-algolia-application-id=([^&]+)', api_url)
-                api_key_match = re.search(r'x-algolia-api-key=([^&]+)', api_url)
-                index_match = re.search(r'/indexes/([^/]+)/query', api_url)
-                
-                if app_id_match and api_key_match and index_match:
-                    vault_code += f"    '{domain}': {{\n"
-                    vault_code += f"        'app_id': '{app_id_match.group(1)}',\n"
-                    vault_code += f"        'api_key': '{api_key_match.group(1)}',\n"
-                    vault_code += f"        'index': '{index_match.group(1)}'\n"
-                    vault_code += f"    }},\n"
-            
-            if vault_code:
-                st.code(vault_code, language='python')
-                st.info("👆 **Copy the code above** and paste it into the `DEALER_API_VAULT` dictionary at the top of your script!")
-            else:
-                st.warning("No valid Algolia API URLs were found in the uploaded file.")
-        else:
-            st.error("Could not find a column containing the API URLs. Please name the new column 'API URL'.")
-            
+
 # --- PDF GENERATOR FUNCTION ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None):
     pdf = FPDF()
