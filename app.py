@@ -487,7 +487,7 @@ def categorize(u):
         
     return 'Other'
 
-def scan_url(url, session, algolia_url):
+def scan_url(url, session):
     domain_to_check = urlparse(str(url)).netloc.replace('www.', '').lower()
     vault_config = DEALER_API_VAULT.get(domain_to_check)
     
@@ -497,15 +497,6 @@ def scan_url(url, session, algolia_url):
         app_id = vault_config['app_id']
         api_key = vault_config['api_key']
         index_name = vault_config['index']
-        
-    elif algolia_url:
-        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
-        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
-        index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
-        if app_id_match and api_key_match and index_match:
-            app_id = app_id_match.group(1)
-            api_key = api_key_match.group(1)
-            index_name = index_match.group(1)
             
     if app_id:
         api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
@@ -611,7 +602,7 @@ st.sidebar.divider()
 with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
     
-    algolia_url = st.text_input("Paste API Query URL here:")
+    algolia_url = st.text_input("Paste API Query URL here:", key="algolia_input")
     
     if st.button("💾 Save Dealer to Vault", use_container_width=True):
         if not algolia_url:
@@ -667,6 +658,7 @@ with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
     st.markdown("---")
     st.markdown("**How to find the API URL:**")
     st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Paste it above and click **Save Dealer**.")
+    st.info("Remember to always click 'Save Dealer to Vault' before running the analysis!")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -686,30 +678,6 @@ if run_analysis_clicked:
     unique_domains_list = [d for d in unique_domains_list if d]
     is_multi_dealer = len(unique_domains_list) > 1
     
-    # --- VAULT AUTO-SAVE (Implicit fallback if they skipped the save button) ---
-    if algolia_url:
-        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
-        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
-        index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
-        
-        if app_id_match and api_key_match and index_match:
-            app_id = app_id_match.group(1)
-            api_key = api_key_match.group(1)
-            idx_name = index_match.group(1)
-            
-            if len(unique_domains_list) == 1:
-                target_domain = unique_domains_list[0]
-                if target_domain not in DEALER_API_VAULT:
-                    try:
-                        new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
-                        if vault_df is not None and gsheets_conn is not None:
-                            updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                            gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                        DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                        st.sidebar.success(f"✅ **Vault Updated!** `{target_domain}` was saved to Google Sheets.")
-                    except Exception as e:
-                        DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-
     df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
@@ -725,7 +693,7 @@ if run_analysis_clicked:
     vdp_results = {}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
-        future_to_url = {executor.submit(scan_url, url, session, algolia_url): url for url in vdp_urls}
+        future_to_url = {executor.submit(scan_url, url, session): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
             vdp_results[url] = future.result()
@@ -853,7 +821,6 @@ if st.session_state.current_report_id is not None:
         ).reset_index()
         df = df.drop(columns=['_is_vdp', '_pipe_val', '_sold_val'])
         
-        # --- NEW FILTER: Remove domains with 0 VDPs Shopped ---
         dealer_group = dealer_group[dealer_group['VDPs_Shopped'] > 0]
         
         dealer_group['Look-to-Book (%)'] = dealer_group.apply(
