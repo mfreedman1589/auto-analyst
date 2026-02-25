@@ -27,10 +27,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- SESSION STATE INITIALIZATION ---
 if 'history' not in st.session_state:
     st.session_state.history = {} 
 if 'current_report_id' not in st.session_state:
     st.session_state.current_report_id = None 
+if 'local_vault_updates' not in st.session_state:
+    st.session_state.local_vault_updates = {}
+if 'min_visitors' not in st.session_state:
+    st.session_state.min_visitors = 1
 
 # --- THE DEALER API VAULT (Google Sheets Powered) ---
 FALLBACK_VAULT = {
@@ -62,6 +67,8 @@ def load_vault():
         return FALLBACK_VAULT, None, None
 
 DEALER_API_VAULT, vault_df, gsheets_conn = load_vault()
+# Instantly apply any in-session saves so the user doesn't have to wait for the 60s cache to clear
+DEALER_API_VAULT.update(st.session_state.local_vault_updates)
 
 # --- LOGIN ---
 def check_password():
@@ -97,8 +104,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 15, report_title, ln=True, align="C")
+    
+    # Updated to include the Attribution Filter Threshold
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 10, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')}", ln=True, align="C")
+    pdf.cell(0, 8, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')} | Attribution Threshold: {metrics.get('min_visitors', 1)}+ VDP Visitors", ln=True, align="C")
     pdf.ln(5)
 
     pdf.set_font("Arial", "B", 14)
@@ -697,6 +706,7 @@ uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['c
 run_analysis_clicked = False
 if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
+    st.sidebar.info("Upload a CSV and click Run. If the dealer blocks our scanner, we'll give you steps to bypass it dynamically!")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -784,90 +794,105 @@ if st.session_state.history:
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
-    # 1. REAL-TIME ATTRIBUTION FILTER UI
-    st.markdown("### 🎯 Interactive VDP Filter")
-    st.markdown(
-        "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
-        "<i>💡 <b>Interactive Filter:</b> Adjust the slider to set the minimum visitors required to claim marketing influence. "
-        "<b>Industry Benchmark:</b> A vehicle typically needs ~30 total VDP views to sell. Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
-        unsafe_allow_html=True
-    )
-    min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=1, step=1, label_visibility="collapsed")
-    st.markdown("---")
-    
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
     
-    # 2. IN-APP ACTION CENTER FOR FIREWALL BLOCKS
+    # 1. IN-APP ACTION CENTER FOR FIREWALL BLOCKS
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
         error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
         troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
         severe_blocks = troubleshoot_df[troubleshoot_df['Blocked Pages'] >= 10]
         
-        if not severe_blocks.empty:
-            severe_count = severe_blocks['Dealer'].nunique()
-            alert_text = f"🚨 Action Required: Resolve Firewall Block{'s' if severe_count > 1 else ''} ({severe_count} Detected)"
-            
-            with st.expander(alert_text, expanded=True):
-                st.markdown("We detected severe firewall blocks on the following dealerships. To fix this, we need to add them to your permanent Vault.")
+        # Filter out ones we've already saved to the Vault
+        pending_blocks = severe_blocks[~severe_blocks['_base_domain'].isin(DEALER_API_VAULT.keys())]
+        
+        if len(severe_blocks) > 0:
+            if len(pending_blocks) > 0:
+                severe_count = len(pending_blocks)
+                alert_text = f"🚨 Action Required: Resolve Firewall Block{'s' if severe_count > 1 else ''} ({severe_count} Remaining)"
                 
-                # The Clickable List
-                st.markdown("**Affected Dealerships:**")
-                affected_domains = severe_blocks['_base_domain'].unique().tolist()
-                for _, row in severe_blocks.iterrows():
-                    st.markdown(f"- **{row['Dealer']}** ({row['Blocked Pages']} blocked pages) 👉 [Open Website in New Tab](https://www.{row['_base_domain']})")
-                
-                # The Workflow Loop Instructions
-                st.markdown("---")
-                st.markdown("**How to fix:**")
-                st.markdown("1. Click a link above to open the dealer's site.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`, right-click the Request URL, and select **Copy URL**.\n5. Select the dealer below, paste the URL, and click **Save**.")
-                
-                # Input UI
-                st.markdown("---")
-                col_sel, col_url = st.columns([1, 2])
-                with col_sel:
-                    target_domain = st.selectbox("1. Select Dealer to Update:", affected_domains)
-                with col_url:
-                    action_algolia_url = st.text_input("2. Paste API Request URL:")
-                
-                if st.button("💾 Save Dealer to Vault", type="primary"):
-                    if action_algolia_url:
-                        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', action_algolia_url)
-                        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', action_algolia_url)
-                        index_match = re.search(r'/indexes/([^/]+)/query', action_algolia_url)
+                with st.expander(alert_text, expanded=True):
+                    st.markdown("We detected secure firewalls blocking our scans. Follow the steps below to bypass the security and reveal true sales data!")
+                    
+                    st.markdown("---")
+                    for _, row in pending_blocks.iterrows():
+                        d_name = row['Dealer']
+                        d_domain = row['_base_domain']
+                        d_blocked = row['Blocked Pages']
                         
-                        if app_id_match and api_key_match and index_match:
-                            app_id = app_id_match.group(1)
-                            api_key = api_key_match.group(1)
-                            idx_name = index_match.group(1)
-                            
-                            if target_domain not in DEALER_API_VAULT:
-                                try:
-                                    new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
-                                    if vault_df is not None and gsheets_conn is not None:
-                                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                                    DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                                    st.success(f"✅ **Success!** `{target_domain}` saved to Vault. Update the next dealer or click **Run Diagnostic Analysis** in the sidebar to rescan!")
-                                except Exception as e:
-                                    DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                                    st.success(f"✅ Saved to memory (Google Sheets connect error). Update next or re-run!")
-                            else:
-                                st.info(f"ℹ️ `{target_domain}` is already in the Vault.")
-                        else:
-                            st.error("Invalid API URL. Please copy the exact URL from the Network tab.")
-                    else:
-                        st.warning("Please paste the URL first!")
-                
-                st.markdown("---")
-                st.download_button(
-                    label="📥 Download Full Troubleshooting Report (CSV)",
-                    data=severe_blocks.to_csv(index=False),
-                    file_name=f"Firewall_Troubleshoot_{st.session_state.current_report_id}.csv",
-                    mime="text/csv"
-                )
+                        c1, c2, c3 = st.columns([3, 4, 2])
+                        with c1:
+                            st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} blocks)*")
+                        with c2:
+                            st.text_input(f"API URL for {d_domain}", key=f"inp_{d_domain}", label_visibility="collapsed", placeholder="Paste API URL here...")
+                        with c3:
+                            if st.button("💾 Save", key=f"btn_{d_domain}", use_container_width=True):
+                                val = st.session_state[f"inp_{d_domain}"]
+                                if val:
+                                    app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
+                                    api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
+                                    index_match = re.search(r'/indexes/([^/]+)/query', val)
+                                    
+                                    if app_id_match and api_key_match and index_match:
+                                        # Save to session memory immediately
+                                        st.session_state.local_vault_updates[d_domain] = {
+                                            'app_id': app_id_match.group(1),
+                                            'api_key': api_key_match.group(1),
+                                            'index': index_match.group(1)
+                                        }
+                                        # Attempt to update GSheets
+                                        try:
+                                            new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id_match.group(1), 'API Key': api_key_match.group(1), 'Index Name': index_match.group(1)}])
+                                            if vault_df is not None and gsheets_conn is not None:
+                                                updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                                gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                                st.cache_data.clear()
+                                        except Exception:
+                                            pass
+                                        st.rerun()
+                                    else:
+                                        st.error("Invalid API URL.")
+                                else:
+                                    st.warning("Paste a URL first!")
+
+                    st.markdown("---")
+                    st.markdown("**How to find the API URL:**")
+                    st.markdown("1. Click the dealer link above to open their site in a new tab.\n2. Right-click anywhere on their page and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`, right-click the Request URL, and select **Copy URL**.")
+                    
+                    pdf_path = "Dealer Inspire URL Steps.pdf"
+                    if os.path.exists(pdf_path):
+                        with open(pdf_path, "rb") as pdf_file:
+                            pdf_bytes = pdf_file.read()
+                        st.download_button(
+                            label="📄 Download Visual Guide (PDF)",
+                            data=pdf_bytes,
+                            file_name="Dealer_Inspire_URL_Steps.pdf",
+                            mime="application/pdf"
+                        )
+            else:
+                st.success("✅ All firewall blocks resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
+
+    # 2. REAL-TIME ATTRIBUTION FILTER UI
+    st.markdown("---")
+    c_filt1, c_filt2 = st.columns([4, 1])
+    with c_filt1:
+        st.markdown("### 🎯 Interactive VDP Filter")
+    with c_filt2:
+        show_filter = st.toggle("Minimize Filter", value=False)
+        
+    if not show_filter:
+        st.markdown(
+            "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
+            "<i>💡 <b>Interactive Filter:</b> Adjust the slider to set the minimum visitors required to claim marketing influence. "
+            "<b>Industry Benchmark:</b> A vehicle typically needs ~30 total VDP views to sell. Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
+            unsafe_allow_html=True
+        )
+        st.session_state.min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=st.session_state.min_visitors, step=1, label_visibility="collapsed")
+    
+    min_visitors = st.session_state.min_visitors
+    st.markdown("---")
             
     # 3. APPLY FILTER
     sold_df = df[(df['Is Sold']) & (df['Attributed Unique Visitors'] >= min_visitors)]
@@ -1072,7 +1097,7 @@ if st.session_state.current_report_id is not None:
     st.divider()
     st.markdown("### 📥 Export Reports")
     
-    # Vertically stacked PDF options
+    # Stacked vertically for better UX
     include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF", value=True)
     include_dealer_details = False
     if domain_count > 1:
@@ -1082,7 +1107,7 @@ if st.session_state.current_report_id is not None:
     
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
-        metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}"}
+        metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors}
         pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export, include_dealer_details)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
