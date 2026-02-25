@@ -697,69 +697,6 @@ uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['c
 run_analysis_clicked = False
 if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
-    
-st.sidebar.divider()
-
-# Sidebar: Cleaned Up Dealer Inspire Fix UI
-with st.sidebar.expander("🛠️ Dealer Inspire Fix"):
-    st.markdown("Use this if your report returns **0 Sold** with a **Firewall Blocked** alert.")
-    
-    algolia_url = st.text_input("Paste API Query URL here:", key="algolia_input")
-    
-    if st.button("💾 Save Dealer to Vault", use_container_width=True):
-        if not algolia_url:
-            st.warning("Please paste the URL first!")
-        elif uploaded_file is None:
-            st.warning("Please upload a traffic CSV first to identify the dealer.")
-        else:
-            try:
-                temp_df = pd.read_csv(uploaded_file)
-                uploaded_file.seek(0)
-                url_col = 'Page Url' if 'Page Url' in temp_df.columns else 'Page URL' if 'Page URL' in temp_df.columns else temp_df.columns[0]
-                
-                temp_df = temp_df.dropna(subset=[url_col])
-                temp_df = temp_df[temp_df[url_col].astype(str).str.strip() != '']
-                
-                domains = temp_df[url_col].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower()).unique()
-                domains = [d for d in domains if d]
-                
-                if len(domains) == 1:
-                    target_domain = domains[0]
-                    app_id_match = re.search(r'x-algolia-application-id=([^&]+)', algolia_url)
-                    api_key_match = re.search(r'x-algolia-api-key=([^&]+)', algolia_url)
-                    index_match = re.search(r'/indexes/([^/]+)/query', algolia_url)
-                    
-                    if app_id_match and api_key_match and index_match:
-                        app_id = app_id_match.group(1)
-                        api_key = api_key_match.group(1)
-                        idx_name = index_match.group(1)
-                        
-                        if target_domain not in DEALER_API_VAULT:
-                            try:
-                                new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
-                                if vault_df is not None and gsheets_conn is not None:
-                                    updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                                    gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                                DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                                st.success(f"✅ **Success!** `{target_domain}` was saved to the Vault. You can now run the analysis!")
-                            except Exception as e:
-                                DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
-                                st.success(f"✅ Saved to memory (Google Sheets connect error). Run the analysis!")
-                        else:
-                            st.info(f"ℹ️ `{target_domain}` is already in the Vault.")
-                    else:
-                        st.error("Invalid API URL. Please copy the exact URL from the Network tab.")
-                elif len(domains) > 1:
-                    st.error("Cannot auto-save for multiple domains. Upload a single-dealer report to save.")
-                else:
-                    st.error("No valid domains found in the file.")
-            except Exception as e:
-                st.error("Error reading file.")
-
-    st.markdown("---")
-    st.markdown("**How to find the API URL:**")
-    st.markdown("1. Open Chrome and go to the dealer's website.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab.\n4. Click the **Fetch/XHR** filter.\n5. Refresh the page.\n6. Search for **`inventory`**.\n7. Right-click the Request URL and copy it.\n8. Paste it above and click **Save Dealer**.")
-    st.info("Remember to always click 'Save Dealer to Vault' before running the analysis!")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -847,12 +784,12 @@ if st.session_state.history:
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
-    # 2. REAL-TIME ATTRIBUTION FILTER UI
-    st.markdown("### 🎛️ Real-Time Attribution Filter")
+    # 1. REAL-TIME ATTRIBUTION FILTER UI
+    st.markdown("### 🎯 Interactive VDP Filter")
     st.markdown(
         "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
-        "<i>💡 <b>Interactive Filter:</b> Adjust the slider below to instantly update the report. "
-        "Industry data shows a vehicle typically needs ~30 VDP views to sell. Raising this threshold ensures you only claim sales driven by high-intent engagement.</i></div>", 
+        "<i>💡 <b>Interactive Filter:</b> Adjust the slider to set the minimum visitors required to claim marketing influence. "
+        "<b>Industry Benchmark:</b> A vehicle typically needs ~30 total VDP views to sell. Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
         unsafe_allow_html=True
     )
     min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=1, step=1, label_visibility="collapsed")
@@ -862,30 +799,75 @@ if st.session_state.current_report_id is not None:
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
     
-    # 1. FIREWALL TROUBLESHOOTING LOGIC
+    # 2. IN-APP ACTION CENTER FOR FIREWALL BLOCKS
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
         error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
-        total_affected_dealers = error_df['Dealer'].nunique()
+        troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
+        severe_blocks = troubleshoot_df[troubleshoot_df['Blocked Pages'] >= 10]
         
-        if total_affected_dealers > 1:
-            troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
-            severe_blocks = troubleshoot_df[troubleshoot_df['Blocked Pages'] >= 10]
+        if not severe_blocks.empty:
+            severe_count = severe_blocks['Dealer'].nunique()
+            alert_text = f"🚨 Action Required: Resolve Firewall Block{'s' if severe_count > 1 else ''} ({severe_count} Detected)"
             
-            if not severe_blocks.empty:
-                severe_count = severe_blocks['Dealer'].nunique()
-                st.warning(f"🚨 **Multi-Dealer Firewall Block Detected:** **{severe_count}** dealerships experienced severe firewall blocks (10+ pages).\n\n👉 *Please download the Troubleshooting Report below and manually add these domains to the Google Sheet Vault!*")
-                severe_blocks = severe_blocks.sort_values(by='Blocked Pages', ascending=False)
-                severe_blocks.rename(columns={'_base_domain': 'Base Domain'}, inplace=True)
+            with st.expander(alert_text, expanded=True):
+                st.markdown("We detected severe firewall blocks on the following dealerships. To fix this, we need to add them to your permanent Vault.")
                 
+                # The Clickable List
+                st.markdown("**Affected Dealerships:**")
+                affected_domains = severe_blocks['_base_domain'].unique().tolist()
+                for _, row in severe_blocks.iterrows():
+                    st.markdown(f"- **{row['Dealer']}** ({row['Blocked Pages']} blocked pages) 👉 [Open Website in New Tab](https://www.{row['_base_domain']})")
+                
+                # The Workflow Loop Instructions
+                st.markdown("---")
+                st.markdown("**How to fix:**")
+                st.markdown("1. Click a link above to open the dealer's site.\n2. Right-click anywhere and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`, right-click the Request URL, and select **Copy URL**.\n5. Select the dealer below, paste the URL, and click **Save**.")
+                
+                # Input UI
+                st.markdown("---")
+                col_sel, col_url = st.columns([1, 2])
+                with col_sel:
+                    target_domain = st.selectbox("1. Select Dealer to Update:", affected_domains)
+                with col_url:
+                    action_algolia_url = st.text_input("2. Paste API Request URL:")
+                
+                if st.button("💾 Save Dealer to Vault", type="primary"):
+                    if action_algolia_url:
+                        app_id_match = re.search(r'x-algolia-application-id=([^&]+)', action_algolia_url)
+                        api_key_match = re.search(r'x-algolia-api-key=([^&]+)', action_algolia_url)
+                        index_match = re.search(r'/indexes/([^/]+)/query', action_algolia_url)
+                        
+                        if app_id_match and api_key_match and index_match:
+                            app_id = app_id_match.group(1)
+                            api_key = api_key_match.group(1)
+                            idx_name = index_match.group(1)
+                            
+                            if target_domain not in DEALER_API_VAULT:
+                                try:
+                                    new_row = pd.DataFrame([{'Base Domain': target_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': idx_name}])
+                                    if vault_df is not None and gsheets_conn is not None:
+                                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                    DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
+                                    st.success(f"✅ **Success!** `{target_domain}` saved to Vault. Update the next dealer or click **Run Diagnostic Analysis** in the sidebar to rescan!")
+                                except Exception as e:
+                                    DEALER_API_VAULT[target_domain] = {'app_id': app_id, 'api_key': api_key, 'index': idx_name}
+                                    st.success(f"✅ Saved to memory (Google Sheets connect error). Update next or re-run!")
+                            else:
+                                st.info(f"ℹ️ `{target_domain}` is already in the Vault.")
+                        else:
+                            st.error("Invalid API URL. Please copy the exact URL from the Network tab.")
+                    else:
+                        st.warning("Please paste the URL first!")
+                
+                st.markdown("---")
                 st.download_button(
-                    label="📥 Download Troubleshooting Report (CSV)",
+                    label="📥 Download Full Troubleshooting Report (CSV)",
                     data=severe_blocks.to_csv(index=False),
                     file_name=f"Firewall_Troubleshoot_{st.session_state.current_report_id}.csv",
                     mime="text/csv"
                 )
-        elif total_affected_dealers == 1 and len(error_df) >= 10:
-            st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
             
     # 3. APPLY FILTER
     sold_df = df[(df['Is Sold']) & (df['Attributed Unique Visitors'] >= min_visitors)]
@@ -1138,7 +1120,7 @@ if st.session_state.current_report_id is not None:
         
         **6. Firewall Blocks & Troubleshooting**
         If your report shows **0 Sold** and triggers a "Firewall Block" alert, the dealer's security (usually Dealer Inspire) blocked our scanner. 
-        * *Action:* Use the **Dealer Inspire Fix** in the sidebar. Find the API URL using the included guide and paste it in. The app will automatically save it to our permanent database (Vault) so that dealer never gets blocked again!
+        * *Action:* Check the top of your report for the **Action Required** panel. It will guide you to find the API URL. The app will automatically save it to our permanent database (Vault) so that dealer never gets blocked again!
         """)
 
 else:
