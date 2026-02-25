@@ -65,7 +65,6 @@ def load_vault():
                     'index': str(row.get('Index Name', '')).strip()
                 }
         
-        # Load Usage Count silently
         try:
             usage_df = conn.read(worksheet="UsageStats", ttl=60)
             st.session_state.global_usage_count = len(usage_df)
@@ -791,7 +790,7 @@ if run_analysis_clicked:
             gsheets_conn.update(worksheet="UsageStats", data=updated_usage)
             st.session_state.global_usage_count = len(updated_usage)
     except Exception:
-        pass # Fails silently if the tab isn't created yet
+        pass 
     
     st.session_state.history[report_id] = df
     st.session_state.current_report_id = report_id
@@ -897,19 +896,14 @@ if st.session_state.current_report_id is not None:
             else:
                 st.success("✅ All inventory syncs resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
 
-    # 2. REAL-TIME ATTRIBUTION FILTER UI
-    st.markdown("---")
-    c_filt1, c_filt2 = st.columns([4, 1])
-    with c_filt1:
-        st.markdown("### 🎯 Interactive VDP Filter")
-    with c_filt2:
-        show_filter = st.toggle("Minimize Filter", value=False)
-        
-    if not show_filter:
+    # 2. REAL-TIME ATTRIBUTION FILTER UI (Sleek Expander Drawer)
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("🎯 Interactive VDP Filter", expanded=False):
         st.markdown(
-            "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
-            "<i>💡 <b>Interactive Filter:</b> Adjust the slider to set the minimum visitors required to claim marketing influence. "
-            "<b>Industry Benchmark:</b> A vehicle typically needs ~30 total VDP views to sell. Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
+            "<div style='font-size: 14px; color: #555; margin-bottom: 15px;'>"
+            "<i>💡 <b>Share of Demand:</b> A vehicle typically needs ~30 total VDP views to sell. "
+            "Adjust the slider to set the minimum visitors required to claim marketing influence. "
+            "Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
             unsafe_allow_html=True
         )
         st.session_state.min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=30, value=st.session_state.min_visitors, step=1, label_visibility="collapsed")
