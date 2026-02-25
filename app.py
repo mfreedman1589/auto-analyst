@@ -311,7 +311,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.ln()
         pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
-             for _, row in missed_df.iterrows():
+             top_missed_detail = missed_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+             for _, row in top_missed_detail.iterrows():
                  name = str(row['Vehicle Name'])[:35]
                  url = str(row['Page Url'])
                  pdf.set_text_color(0, 0, 255) 
@@ -935,9 +936,9 @@ if st.session_state.current_report_id is not None:
     if not sold_df.empty:
         avg_v = sold_df['Attributed Unique Visitors'].mean()
         missed_threshold = max(avg_v, min_visitors)
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)]
     else:
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)]
 
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
@@ -1067,7 +1068,7 @@ if st.session_state.current_report_id is not None:
     if not missed_df.empty:
         st.write("") 
         st.subheader("👀 Missed Opportunities (Detail)")
-        display_missed = missed_df[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].reset_index(drop=True)
+        display_missed = missed_df[['Dealer', 'Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10).reset_index(drop=True)
         display_missed.index += 1
         st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
