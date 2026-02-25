@@ -171,10 +171,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.ln(5)
     
     pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, "Traffic Mix (Visitors by Page Type)", ln=True)
+    pdf.cell(0, 8, "Traffic Mix (Unique Visits by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
     pdf.cell(100, 8, "Page Category", border=1)
-    pdf.cell(40, 8, "Visitors", border=1)
+    pdf.cell(40, 8, "Unique Visits", border=1)
     pdf.ln()
     pdf.set_font("Arial", "", 9)
     traffic_mix = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
@@ -916,9 +916,9 @@ if st.session_state.current_report_id is not None:
     min_visitors = st.session_state.min_visitors
     st.markdown("---")
             
-    # 3. APPLY FILTER
-    sold_df = df[(df['Is Sold']) & (df['Attributed Unique Visitors'] >= min_visitors)]
-    vdp_df = df[df['Category'].str.contains('VDP', na=False)]
+    # 3. APPLY FILTER (The "Velocity" Metric Update)
+    vdp_df = df[(df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)]
+    sold_df = vdp_df[vdp_df['Is Sold']]
     
     new_vdp_all = vdp_df[vdp_df['Type'] == 'New']
     new_sold = sold_df[sold_df['Type'] == 'New']
@@ -935,9 +935,10 @@ if st.session_state.current_report_id is not None:
     
     if not sold_df.empty:
         avg_v = sold_df['Attributed Unique Visitors'].mean()
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= avg_v)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        missed_threshold = max(avg_v, min_visitors)
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
     else:
-        missed_df = pd.DataFrame()
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
 
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
@@ -955,10 +956,10 @@ if st.session_state.current_report_id is not None:
         st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Sites)")
         show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
         
-        t2_base = df.groupby('Dealer').agg(
-            Total_Visitors=('Attributed Unique Visitors', 'sum'),
-            VDPs_Shopped=('Category', lambda x: x.str.contains('VDP', na=False).sum()),
-            Pipeline_Value=('Est. Value', lambda x: x[df.loc[x.index, 'Category'].str.contains('VDP', na=False)].sum())
+        t2_visitors = df.groupby('Dealer')['Attributed Unique Visitors'].sum().reset_index(name='Total Visitors')
+        t2_vdps = vdp_df.groupby('Dealer').agg(
+            VDPs_Shopped=('Category', 'count'),
+            Pipeline_Value=('Est. Value', 'sum')
         ).reset_index()
         
         t2_sold = sold_df.groupby('Dealer').agg(
@@ -966,7 +967,7 @@ if st.session_state.current_report_id is not None:
             Est_Rev_Sold=('Est. Value', 'sum')
         ).reset_index()
         
-        dealer_group = t2_base.merge(t2_sold, on='Dealer', how='left').fillna({'Units_Sold': 0, 'Est_Rev_Sold': 0})
+        dealer_group = t2_visitors.merge(t2_vdps, on='Dealer', how='left').merge(t2_sold, on='Dealer', how='left').fillna(0)
         dealer_group = dealer_group[dealer_group['VDPs_Shopped'] > 0]
         
         dealer_group['Look-to-Book (%)'] = dealer_group.apply(
@@ -975,7 +976,6 @@ if st.session_state.current_report_id is not None:
         )
         
         dealer_group = dealer_group.rename(columns={
-            'Total_Visitors': 'Total Visitors',
             'VDPs_Shopped': 'VDPs Shopped',
             'Units_Sold': 'Units Sold',
             'Est_Rev_Sold': 'Est. Rev Sold',
@@ -1007,7 +1007,8 @@ if st.session_state.current_report_id is not None:
     with c1:
         st.markdown("**Traffic Mix**")
         traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
-        fig1 = px.bar(traffic_data, x='Category', y='Attributed Unique Visitors')
+        traffic_data = traffic_data.rename(columns={'Attributed Unique Visitors': 'Unique Visits'})
+        fig1 = px.bar(traffic_data, x='Category', y='Unique Visits', labels={'Unique Visits': 'Unique Visits'})
         st.plotly_chart(fig1, use_container_width=True)
     with c2:
         st.markdown("**Sales Mix (New vs Used)**")
@@ -1084,7 +1085,8 @@ if st.session_state.current_report_id is not None:
             for dealer_name in dealer_group_export['Dealer']:
                 with st.expander(f"🏢 {dealer_name} - Performance Details", expanded=expand_all):
                     d_sold = sold_df[sold_df['Dealer'] == dealer_name]
-                    d_missed = df[(df['Dealer'] == dealer_name) & (df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= (avg_v if not sold_df.empty else 1))]
+                    missed_threshold_local = max(avg_v, min_visitors) if not sold_df.empty else min_visitors
+                    d_missed = df[(df['Dealer'] == dealer_name) & (df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold_local)]
                     
                     if d_sold.empty and d_missed.empty:
                         st.info("No actionable sales or high-interest missed opportunities meet the current thresholds for this dealer.")
@@ -1151,10 +1153,9 @@ if st.session_state.current_report_id is not None:
         * **Used Cars:** Calculated using the base MSRP depreciated by age.
         * *Note: This is a directional estimate to gauge "Total Pipeline Power," not accounting for specific trim levels, options, or dealer markups.*
         
-        **3. Look-to-Book Ratio (New vs. Used)**
-        The efficiency metric of the inventory. It measures the conversion velocity of the cars we drove traffic to.
-        * *Formula:* `(Sold VDPs ÷ Total Active VDPs) × 100`
-        * *Insight:* We split this by **New** and **Used**. A high "Used" LTB with a low "New" LTB often indicates a pricing or merchandising issue on the New car inventory.
+        **3. Look-to-Book Ratio (Velocity Metric)**
+        The efficiency metric of the inventory. It measures the conversion velocity of the cars we drove traffic to. By using the Interactive VDP Filter, this transforms into a Velocity Metric—proving that highly concentrated traffic yields significantly higher conversion rates.
+        * *Formula:* `(Sold VDPs) ÷ (Total Active VDPs)`
         
         **4. Tier 2 / Auto Group Breakdown**
         Aggregates performance across multiple dealerships if a multi-domain report is uploaded. 
@@ -1177,3 +1178,4 @@ else:
     st.markdown("1. **🏢 Auto Group & Tier 2 Recognition:** Automatically detects multi-dealer reports and generates a clean, dealership-by-dealership sales breakdown.")
     st.markdown("2. **🎯 Interactive VDP Filter:** A new real-time slider that lets you filter attributed sales based on the number of VDP visits we drove, helping you prove high-intent demand.")
     st.markdown("3. **⚙️ Automated Dealer Sync (The Vault):** If a dealer's inventory is hidden behind a security provider, the app now generates a built-in guide to easily sync their API. Once saved, the tool remembers it forever!")
+    st.markdown("4. **📈 Online Conversions Tracking:** Form submissions and appointment bookings are now recognized and displayed in the Traffic Mix!")
