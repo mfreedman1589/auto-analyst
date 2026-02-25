@@ -36,6 +36,8 @@ if 'local_vault_updates' not in st.session_state:
     st.session_state.local_vault_updates = {}
 if 'min_visitors' not in st.session_state:
     st.session_state.min_visitors = 1
+if 'global_usage_count' not in st.session_state:
+    st.session_state.global_usage_count = "..."
 
 # --- THE DEALER API VAULT (Google Sheets Powered) ---
 FALLBACK_VAULT = {
@@ -62,6 +64,14 @@ def load_vault():
                     'api_key': str(row.get('API Key', '')).strip(),
                     'index': str(row.get('Index Name', '')).strip()
                 }
+        
+        # Load Usage Count silently
+        try:
+            usage_df = conn.read(worksheet="UsageStats", ttl=60)
+            st.session_state.global_usage_count = len(usage_df)
+        except Exception:
+            pass
+            
         return vault_dict, vault_df, conn
     except Exception as e:
         return FALLBACK_VAULT, None, None
@@ -529,10 +539,8 @@ def smart_dealer_name(url, is_multi=False):
     brands.sort(key=len, reverse=True)
     has_brand = False
     
-    # Analyze string and dynamically break out all brands
     for brand in brands:
         if brand in s:
-            # Protect common partial matches
             if brand == 'ram' and ('paramus' in s or 'framingham' in s):
                 continue
             if brand == 'ford' and ('oxford' in s or 'crawford' in s or 'stratford' in s):
@@ -774,6 +782,17 @@ if run_analysis_clicked:
         domain = df['Dealer'].iloc[0] if len(df) > 0 else "Unknown Dealer"
         report_id = f"{domain} ({report_time})"
     
+    # --- USAGE TRACKER ---
+    try:
+        if gsheets_conn is not None:
+            usage_df = gsheets_conn.read(worksheet="UsageStats", ttl=0)
+            new_usage = pd.DataFrame([{"Timestamp": str(datetime.datetime.now(eastern)), "Report": report_id}])
+            updated_usage = pd.concat([usage_df, new_usage], ignore_index=True)
+            gsheets_conn.update(worksheet="UsageStats", data=updated_usage)
+            st.session_state.global_usage_count = len(updated_usage)
+    except Exception:
+        pass # Fails silently if the tab isn't created yet
+    
     st.session_state.history[report_id] = df
     st.session_state.current_report_id = report_id
     
@@ -795,6 +814,9 @@ if st.session_state.history:
         st.session_state.history = {}
         st.session_state.current_report_id = None
         st.rerun()
+        
+    st.sidebar.divider()
+    st.sidebar.markdown(f"📈 **Total Global Scans:** `{st.session_state.global_usage_count}`")
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
@@ -809,7 +831,6 @@ if st.session_state.current_report_id is not None:
         troubleshoot_df = error_df.groupby(['Dealer', '_base_domain']).size().reset_index(name='Blocked Pages')
         severe_blocks = troubleshoot_df[troubleshoot_df['Blocked Pages'] >= 10]
         
-        # Filter out ones we've already saved to the Vault
         pending_blocks = severe_blocks[~severe_blocks['_base_domain'].isin(DEALER_API_VAULT.keys())]
         
         if len(severe_blocks) > 0:
@@ -840,13 +861,11 @@ if st.session_state.current_report_id is not None:
                                     index_match = re.search(r'/indexes/([^/]+)/query', val)
                                     
                                     if app_id_match and api_key_match and index_match:
-                                        # Save to session memory immediately
                                         st.session_state.local_vault_updates[d_domain] = {
                                             'app_id': app_id_match.group(1),
                                             'api_key': api_key_match.group(1),
                                             'index': index_match.group(1)
                                         }
-                                        # Attempt to update GSheets
                                         try:
                                             new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id_match.group(1), 'API Key': api_key_match.group(1), 'Index Name': index_match.group(1)}])
                                             if vault_df is not None and gsheets_conn is not None:
