@@ -589,6 +589,11 @@ def clean_name_universal(url):
 
 def categorize(u):
     u = str(u).lower()
+    
+    # Check for Online Conversions first
+    if any(x in u for x in ['thank', 'confirm', 'success']):
+        return 'Online Conversions'
+        
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
     if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
     
