@@ -40,7 +40,7 @@ FALLBACK_VAULT = {
     'joebasilchevrolet.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'joebasilchevy_production_inventory'},
     'robertbasilcars.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'robertbasilbuickgmc_production_inventory'},
     'basilresale.com': {'app_id': 'EHWUW84XVK', 'api_key': 'fb58227032e79f03b9b820cbaea7f8fb', 'index': 'basilresalesheridan_production_inventory'},
-    'basilmitsubishi.com': {'app_id': 'EQU6HXB6WG', 'api_key': 'da97ef494552f47ecc6f47068888d120', 'index': 'basilmitsubishi-winback0323_production_inventory'},
+    'basilmitsubishi.com': {'app_id': 'EQU6HXB6WG', 'api_key': 'da97ef494552f47ecc6f4706888d120', 'index': 'basilmitsubishi-winback0323_production_inventory'},
     'basilfredonia.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'basilchevybuick_production_inventory'}
 }
 
@@ -847,6 +847,17 @@ if st.session_state.history:
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
+    # 2. REAL-TIME ATTRIBUTION FILTER UI
+    st.markdown("### 🎛️ Real-Time Attribution Filter")
+    st.markdown(
+        "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
+        "<i>💡 <b>Interactive Filter:</b> Adjust the slider below to instantly update the report. "
+        "Industry data shows a vehicle typically needs ~30 VDP views to sell. Raising this threshold ensures you only claim sales driven by high-intent engagement.</i></div>", 
+        unsafe_allow_html=True
+    )
+    min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=1, step=1, label_visibility="collapsed")
+    st.markdown("---")
+    
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
@@ -876,18 +887,6 @@ if st.session_state.current_report_id is not None:
         elif total_affected_dealers == 1 and len(error_df) >= 10:
             st.warning(f"🚨 **Firewall Block Detected:** The dealer's website actively blocked **{len(error_df)}** of our scans.\n\n👉 *If this is a Dealer Inspire website, try using the **'Dealer Inspire Fix'** in the left sidebar!*")
             
-    # 2. REAL-TIME ATTRIBUTION FILTER UI
-    st.markdown("---")
-    st.markdown("### 🎛️ Real-Time Attribution Filter")
-    st.markdown(
-        "<div style='font-size: 14px; color: #555; margin-bottom: 10px;'>"
-        "<i>💡 <b>Interactive Filter:</b> Adjust the slider below to instantly update the report. "
-        "Industry data shows a vehicle typically needs ~30 VDP views to sell. Raising this threshold ensures you only claim sales driven by high-intent engagement.</i></div>", 
-        unsafe_allow_html=True
-    )
-    min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=1, step=1, label_visibility="collapsed")
-    st.markdown("---")
-    
     # 3. APPLY FILTER
     sold_df = df[(df['Is Sold']) & (df['Attributed Unique Visitors'] >= min_visitors)]
     vdp_df = df[df['Category'].str.contains('VDP', na=False)]
