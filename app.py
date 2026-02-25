@@ -67,7 +67,6 @@ def load_vault():
         return FALLBACK_VAULT, None, None
 
 DEALER_API_VAULT, vault_df, gsheets_conn = load_vault()
-# Instantly apply any in-session saves so the user doesn't have to wait for the 60s cache to clear
 DEALER_API_VAULT.update(st.session_state.local_vault_updates)
 
 # --- LOGIN ---
@@ -105,7 +104,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 15, report_title, ln=True, align="C")
     
-    # Updated to include the Attribution Filter Threshold
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 8, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')} | Attribution Threshold: {metrics.get('min_visitors', 1)}+ VDP Visitors", ln=True, align="C")
     pdf.ln(5)
@@ -530,11 +528,17 @@ def smart_dealer_name(url, is_multi=False):
         
     brands.sort(key=len, reverse=True)
     has_brand = False
+    
+    # Analyze string and dynamically break out all brands
     for brand in brands:
         if brand in s:
+            # Protect common partial matches
+            if brand == 'ram' and ('paramus' in s or 'framingham' in s):
+                continue
+            if brand == 'ford' and ('oxford' in s or 'crawford' in s or 'stratford' in s):
+                continue
             s = s.replace(brand, f" {brand} ")
             has_brand = True
-            break 
             
     s = re.sub(r'\s+', ' ', s).strip().title()
     s = s.replace(" Vw", " VW").replace(" Bmw", " BMW").replace(" Gmc", " GMC")
@@ -651,7 +655,7 @@ def check_universal_status(url, session):
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
         if response.status_code in [403, 406, 429]:
-            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
+            return f"ERROR (Inventory Sync Required: {response.status_code})"
             
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
@@ -668,7 +672,7 @@ def check_universal_status(url, session):
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
-        if any(b in page_title for b in bot_titles): return "ERROR (Cloudflare Bot Block)"
+        if any(b in page_title for b in bot_titles): return "ERROR (Inventory Sync Required)"
             
         meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
         if meta_refresh and meta_refresh.get('content'):
@@ -706,7 +710,7 @@ uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['c
 run_analysis_clicked = False
 if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
-    st.sidebar.info("Upload a CSV and click Run. If the dealer blocks our scanner, we'll give you steps to bypass it dynamically!")
+    st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -798,7 +802,7 @@ if st.session_state.current_report_id is not None:
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
     
-    # 1. IN-APP ACTION CENTER FOR FIREWALL BLOCKS
+    # 1. IN-APP ACTION CENTER FOR INVENTORY SYNC
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
     if not error_df.empty:
         error_df['_base_domain'] = error_df['Page Url'].apply(lambda x: urlparse(str(x)).netloc.replace('www.', '').lower())
@@ -811,10 +815,10 @@ if st.session_state.current_report_id is not None:
         if len(severe_blocks) > 0:
             if len(pending_blocks) > 0:
                 severe_count = len(pending_blocks)
-                alert_text = f"🚨 Action Required: Resolve Firewall Block{'s' if severe_count > 1 else ''} ({severe_count} Remaining)"
+                alert_text = f"⚙️ Action Required: Sync Inventory Database{'s' if severe_count > 1 else ''} ({severe_count} Remaining)"
                 
                 with st.expander(alert_text, expanded=True):
-                    st.markdown("We detected secure firewalls blocking our scans. Follow the steps below to bypass the security and reveal true sales data!")
+                    st.markdown("We need a little help syncing with the inventory databases for the following dealerships. Follow the simple steps below to map their API to your permanent Vault and reveal true sales data!")
                     
                     st.markdown("---")
                     for _, row in pending_blocks.iterrows():
@@ -824,7 +828,7 @@ if st.session_state.current_report_id is not None:
                         
                         c1, c2, c3 = st.columns([3, 4, 2])
                         with c1:
-                            st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} blocks)*")
+                            st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
                         with c2:
                             st.text_input(f"API URL for {d_domain}", key=f"inp_{d_domain}", label_visibility="collapsed", placeholder="Paste API URL here...")
                         with c3:
@@ -859,7 +863,7 @@ if st.session_state.current_report_id is not None:
 
                     st.markdown("---")
                     st.markdown("**How to find the API URL:**")
-                    st.markdown("1. Click the dealer link above to open their site in a new tab.\n2. Right-click anywhere on their page and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`, right-click the Request URL, and select **Copy URL**.")
+                    st.markdown("1. Click the dealer link above to open their site in a new tab.\n2. Right-click anywhere on their page and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`. Click the result starting with **`query?`** (it will contain 'algolia' in the URL). Right-click it and select **Copy URL**.")
                     
                     pdf_path = "Dealer Inspire URL Steps.pdf"
                     if os.path.exists(pdf_path):
@@ -872,7 +876,7 @@ if st.session_state.current_report_id is not None:
                             mime="application/pdf"
                         )
             else:
-                st.success("✅ All firewall blocks resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
+                st.success("✅ All inventory syncs resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
 
     # 2. REAL-TIME ATTRIBUTION FILTER UI
     st.markdown("---")
@@ -1097,13 +1101,12 @@ if st.session_state.current_report_id is not None:
     st.divider()
     st.markdown("### 📥 Export Reports")
     
-    # Stacked vertically for better UX
     include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF", value=True)
     include_dealer_details = False
     if domain_count > 1:
         include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in PDF", value=False)
         
-    st.write("") # Spacer
+    st.write("") 
     
     ex1, ex2, ex3 = st.columns(3)
     with ex1:
@@ -1143,10 +1146,16 @@ if st.session_state.current_report_id is not None:
         * **Top Sold:** The specific vehicles that received the highest exposure and subsequently sold.
         * **Missed Opportunities:** Active vehicles receiving **above-average traffic** that haven't sold yet. Audit these VDPs immediately for missing photos, "Call for Price" buttons, or pricing outliers!
         
-        **6. Firewall Blocks & Troubleshooting**
-        If your report shows **0 Sold** and triggers a "Firewall Block" alert, the dealer's security (usually Dealer Inspire) blocked our scanner. 
-        * *Action:* Check the top of your report for the **Action Required** panel. It will guide you to find the API URL. The app will automatically save it to our permanent database (Vault) so that dealer never gets blocked again!
+        **6. Inventory Syncs & Troubleshooting**
+        If your report shows **0 Sold** and triggers an "Action Required" alert, the dealer's inventory database requires a direct connection. 
+        * *Action:* Check the top of your report for the **Action Required** panel. It will guide you to find the API URL. The app will automatically save it to our permanent database (Vault) so that dealer is seamlessly synced moving forward!
         """)
 
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
+    st.markdown("---")
+    st.markdown("### 🚀 Version 3.0 Updates")
+    st.markdown("Welcome to the latest version of the Auto-Sales Intelligence Agent! Here is what's new:")
+    st.markdown("1. **🏢 Auto Group & Tier 2 Recognition:** Automatically detects multi-dealer reports and generates a clean, dealership-by-dealership sales breakdown.")
+    st.markdown("2. **🎯 Interactive VDP Filter:** A new real-time slider that lets you filter attributed sales based on the number of VDP visits we drove, helping you prove high-intent demand.")
+    st.markdown("3. **⚙️ Automated Dealer Sync (The Vault):** If a dealer's inventory is hidden behind a security provider, the app now generates a built-in guide to easily sync their API. Once saved, the tool remembers it forever!")
