@@ -893,7 +893,7 @@ if st.session_state.current_report_id is not None:
             "<b>Industry Benchmark:</b> A vehicle typically needs ~30 total VDP views to sell. Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
             unsafe_allow_html=True
         )
-        st.session_state.min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=50, value=st.session_state.min_visitors, step=1, label_visibility="collapsed")
+        st.session_state.min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=30, value=st.session_state.min_visitors, step=1, label_visibility="collapsed")
     
     min_visitors = st.session_state.min_visitors
     st.markdown("---")
