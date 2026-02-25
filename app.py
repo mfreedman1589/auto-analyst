@@ -590,7 +590,6 @@ def clean_name_universal(url):
 def categorize(u):
     u = str(u).lower()
     
-    # Check for Online Conversions first
     if any(x in u for x in ['thank', 'confirm', 'success']):
         return 'Online Conversions'
         
@@ -911,7 +910,7 @@ if st.session_state.current_report_id is not None:
             "Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
             unsafe_allow_html=True
         )
-        st.session_state.min_visitors = st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=30, value=st.session_state.min_visitors, step=1, label_visibility="collapsed")
+        st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=30, step=1, label_visibility="collapsed", key="min_visitors")
     
     min_visitors = st.session_state.min_visitors
     st.markdown("---")
