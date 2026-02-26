@@ -717,10 +717,20 @@ def check_universal_status(url, session):
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
 
-        # --- 2. FAST REGEX SPA SCANNER (No CPU Bottleneck!) ---
-        # This replaces the memory-heavy text replacement with a blazing fast C-level regex.
-        # It catches the "hidden" JSON code immediately without delaying the network pool.
-        if re.search(r'availability["\'\s:]+http://schema\.org/(?:outofstock|soldout)|(?:inventory|vehicle)status["\'\s:]+sold|isavailable["\'\s:]+false', text_lower):
+        # --- 2. LIGHTNING-FAST SPA SCANNER ---
+        # Eliminates memory-heavy string replacements and Regex to prevent CPU thread-jams.
+        # Uses raw C-optimized 'in' operations for instant execution.
+        if "schema.org/outofstock" in text_lower or "schema.org/soldout" in text_lower:
+            return "SOLD (Hidden SPA / JSON Flag)"
+            
+        json_phrases = [
+            '"inventorystatus":"sold"', '"inventorystatus": "sold"',
+            '"vehiclestatus":"sold"', '"vehiclestatus": "sold"',
+            '"status":"sold"', '"status": "sold"',
+            '"isavailable":false', '"isavailable": false'
+        ]
+        
+        if any(phrase in text_lower for phrase in json_phrases):
             return "SOLD (Hidden SPA / JSON Flag)"
             
         return "Available"
