@@ -656,8 +656,7 @@ def check_universal_status(url, session):
     if not year: return "N/A"
     
     try:
-        # --- REVERTED TO YOUR EXACT ORIGINAL HEADERS ---
-        # These successfully bypass the Heritage Chrysler firewall!
+        # EXACT ORIGINAL HEADERS - DO NOT CHANGE
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -666,7 +665,6 @@ def check_universal_status(url, session):
             'Upgrade-Insecure-Requests': '1'
         }
         
-        # Reverted back to your original 5-second timeout
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
         if response.status_code in [403, 406, 429]:
@@ -683,6 +681,8 @@ def check_universal_status(url, session):
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
+        
+        # Explicitly setting text_lower ensures it doesn't throw a silent variable error
         text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
@@ -709,7 +709,6 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
-        # --- 1. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
@@ -719,9 +718,6 @@ def check_universal_status(url, session):
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
 
-        # --- 2. THE NEW EDGE-CASE SCANNER (LAST RESORT) ---
-        # Placed at the very end. Because the headers above match your original working code, 
-        # this will safely read the background code for the Honda without triggering the 403!
         text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
         json_sold_flags = [
             'availability:http://schema.org/outofstock',
@@ -777,13 +773,16 @@ if run_analysis_clicked:
     
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
+    
+    # --- POOL REDUCED TO 15 TO EVADE WAF BANS ---
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=15, pool_maxsize=15)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     
     vdp_results = {}
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+    # --- WORKERS REDUCED TO 15 TO EVADE WAF BANS ---
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         future_to_url = {executor.submit(scan_url, url, session): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
