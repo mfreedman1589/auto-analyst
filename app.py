@@ -684,15 +684,33 @@ def check_universal_status(url, session):
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # --- NEW: SOFT-SOLD / OVERLAY SCANNER ---
+        # --- NEW: SOFT-SOLD & SPA JSON SCANNER ---
+        # 1. Check visual text overlays (for traditional HTML sites)
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
             "vehicle has been sold",
-            "currently out of stock"
+            "currently out of stock",
+            "vehicle is no longer in stock"
         ]
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
+            
+        # 2. Check embedded JSON / SPA State (For Angular/React sites like West Broad Honda)
+        # We strip spaces and quotes to catch minified JSON payloads regardless of formatting
+        text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
+        
+        json_sold_flags = [
+            'availability:http://schema.org/outofstock',
+            'availability:http://schema.org/soldout',
+            'inventorystatus:sold',
+            'vehiclestatus:sold',
+            'status:sold',
+            'isavailable:false'
+        ]
+        
+        if any(flag in text_collapsed for flag in json_sold_flags):
+            return "SOLD (Hidden SPA / JSON Flag)"
         # ----------------------------------------
         
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
