@@ -581,7 +581,18 @@ def clean_name_universal(url):
     rest = rest.replace('/', ' ').replace('-', ' ').replace('+', ' ').replace('.htm', '').replace('.html', '')
     tokens = rest.split()
     
-    junk = ['Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 'Finance', 'Global', 'Incentives', 'Offers', 'Suv', 'Truck', 'Coupe', 'Sedan', 'Vehicle', 'Vehicles']
+    # --- UPDATED JUNK LIST ---
+    # We added SEO filler strings and common location tags (In, Richmond, Va, Sale, etc.)
+    # so they are perfectly stripped out of the final car title.
+    junk = [
+        'Baltimore', 'Ephrata', 'Md', 'Maryland', 'Heritage', 'Twin', 'Pine', 
+        'Wholesale', 'New', 'Used', 'Preowned', 'Inventory', 'Parts', 'Service', 
+        'Finance', 'Global', 'Incentives', 'Offers', 'Suv', 'Truck', 'Coupe', 
+        'Sedan', 'Vehicle', 'Vehicles', 'In', 'Richmond', 'Va', 'Virginia',
+        'For', 'Sale', 'Near', 'Me', 'Certified', 'Cpo', 'Dealership', 'Auto',
+        'West', 'Broad'
+    ]
+    
     clean_tokens = [t for t in tokens if not (len(t) > 10 and any(c.isdigit() for c in t)) and t.title() not in junk and t.title() != make]
     
     clean_tokens = [t for t in clean_tokens if t != str(year)]
@@ -706,7 +717,7 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
         
-        # --- NEW: SOFT-SOLD / OVERLAY / SINCRO SCANNER ---
+        # --- THE SINCRO / SPA / SOFT-SOLD SCANNER ---
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
