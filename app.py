@@ -680,6 +680,7 @@ def check_universal_status(url, session):
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
+        text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
@@ -705,12 +706,30 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
+        # --- NEW: SOFT-SOLD / OVERLAY / JSON SCANNER ---
+        soft_sold_phrases = [
+            "no longer available",
+            "this vehicle is sold",
+            "vehicle has been sold",
+            "currently out of stock",
+            "schema.org/outofstock",     
+            "schema.org/soldout",        
+            '"inventorystatus":"sold"',  
+            '"inventorystatus": "sold"', 
+            '"vehiclestatus":"sold"',    
+            '"vehiclestatus": "sold"',
+            '"isavailable":false',
+            '"isavailable": false'
+        ]
+        if any(phrase in text_lower for phrase in soft_sold_phrases):
+            return "SOLD (Out of Stock Overlay)"
+        # ----------------------------------------
+            
         return "Available"
         
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
     except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
-
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
