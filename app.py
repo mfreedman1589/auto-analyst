@@ -649,14 +649,13 @@ def scan_url(url, session):
             
     else:
         return check_universal_status(url, session)
-        
+
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
     try:
-        # EXACT ORIGINAL HEADERS - DO NOT CHANGE
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -707,38 +706,32 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
-        # --- 1. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
+        # --- NEW: SOFT-SOLD / OVERLAY / JSON SCANNER ---
+        # This is your exact original scanner, just with the JSON phrases added to the list!
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
             "vehicle has been sold",
-            "currently out of stock"
+            "currently out of stock",
+            "schema.org/outofstock",     
+            "schema.org/soldout",        
+            '"inventorystatus":"sold"',  
+            '"inventorystatus": "sold"', 
+            '"vehiclestatus":"sold"',    
+            '"vehiclestatus": "sold"',
+            '"isavailable":false',
+            '"isavailable": false'
         ]
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
-
-        # --- 2. LIGHTNING-FAST SPA SCANNER ---
-        # Eliminates memory-heavy string replacements and Regex to prevent CPU thread-jams.
-        # Uses raw C-optimized 'in' operations for instant execution.
-        if "schema.org/outofstock" in text_lower or "schema.org/soldout" in text_lower:
-            return "SOLD (Hidden SPA / JSON Flag)"
-            
-        json_phrases = [
-            '"inventorystatus":"sold"', '"inventorystatus": "sold"',
-            '"vehiclestatus":"sold"', '"vehiclestatus": "sold"',
-            '"status":"sold"', '"status": "sold"',
-            '"isavailable":false', '"isavailable": false'
-        ]
-        
-        if any(phrase in text_lower for phrase in json_phrases):
-            return "SOLD (Hidden SPA / JSON Flag)"
+        # ----------------------------------------
             
         return "Available"
         
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
     except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
-        
+
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
@@ -774,7 +767,6 @@ if run_analysis_clicked:
     st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
     progress_bar = st.progress(0)
     
-    # --- WORKERS AND POOL RESTORED TO 60 (FULL SPEED) ---
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
