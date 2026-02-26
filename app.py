@@ -649,7 +649,7 @@ def scan_url(url, session):
             
     else:
         return check_universal_status(url, session)
-
+        
 def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
@@ -684,35 +684,6 @@ def check_universal_status(url, session):
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
-        # --- NEW: SOFT-SOLD & SPA JSON SCANNER ---
-        # 1. Check visual text overlays (for traditional HTML sites)
-        soft_sold_phrases = [
-            "no longer available",
-            "this vehicle is sold",
-            "vehicle has been sold",
-            "currently out of stock",
-            "vehicle is no longer in stock"
-        ]
-        if any(phrase in text_lower for phrase in soft_sold_phrases):
-            return "SOLD (Out of Stock Overlay)"
-            
-        # 2. Check embedded JSON / SPA State (For Angular/React sites like West Broad Honda)
-        # We strip spaces and quotes to catch minified JSON payloads regardless of formatting
-        text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
-        
-        json_sold_flags = [
-            'availability:http://schema.org/outofstock',
-            'availability:http://schema.org/soldout',
-            'inventorystatus:sold',
-            'vehiclestatus:sold',
-            'status:sold',
-            'isavailable:false'
-        ]
-        
-        if any(flag in text_collapsed for flag in json_sold_flags):
-            return "SOLD (Hidden SPA / JSON Flag)"
-        # ----------------------------------------
-        
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
         if any(b in page_title for b in bot_titles): return "ERROR (Inventory Sync Required)"
             
@@ -734,6 +705,31 @@ def check_universal_status(url, session):
             
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
+            
+        # --- 1. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
+        soft_sold_phrases = [
+            "no longer available",
+            "this vehicle is sold",
+            "vehicle has been sold",
+            "currently out of stock"
+        ]
+        if any(phrase in text_lower for phrase in soft_sold_phrases):
+            return "SOLD (Out of Stock Overlay)"
+
+        # --- 2. THE NEW EDGE-CASE SCANNER (LAST RESORT) ---
+        # This ONLY runs if literally everything above it failed to find a "Sold" indicator.
+        text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
+        json_sold_flags = [
+            'availability:http://schema.org/outofstock',
+            'availability:http://schema.org/soldout',
+            'inventorystatus:sold',
+            'vehiclestatus:sold',
+            'status:sold',
+            'isavailable:false'
+        ]
+        
+        if any(flag in text_collapsed for flag in json_sold_flags):
+            return "SOLD (Hidden SPA / JSON Flag)"
             
         return "Available"
         
