@@ -13,6 +13,7 @@ import pytz
 from fpdf import FPDF
 import io
 import os
+import random
 from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURATION & CUSTOM CSS ---
@@ -620,7 +621,7 @@ def scan_url(url, session):
     
     app_id, api_key, index_name = None, None, None
     
-    if vault_config:
+    if vault_config and isinstance(vault_config, dict) and vault_config.get('app_id') != 'IGNORE':
         app_id = vault_config['app_id']
         api_key = vault_config['api_key']
         index_name = vault_config['index']
@@ -651,23 +652,35 @@ def scan_url(url, session):
         return check_universal_status(url, session)
 
 def check_universal_status(url, session):
+    url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
+    # WAF EVASION HEADERS
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
+    ]
+    
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': random.choice(user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
         }
         
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
         if response.status_code in [403, 406, 429]:
-            return f"ERROR (Inventory Sync Required: {response.status_code})"
+            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
@@ -684,8 +697,27 @@ def check_universal_status(url, session):
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
+        # --- SOFT-SOLD / OVERLAY / JSON SCANNER ---
+        soft_sold_phrases = [
+            "no longer available",
+            "this vehicle is sold",
+            "vehicle has been sold",
+            "currently out of stock",
+            "schema.org/outofstock",     
+            "schema.org/soldout",        
+            '"inventorystatus":"sold"',  
+            '"inventorystatus": "sold"', 
+            '"vehiclestatus":"sold"',    
+            '"vehiclestatus": "sold"',
+            '"isavailable":false',
+            '"isavailable": false'
+        ]
+        if any(phrase in text_lower for phrase in soft_sold_phrases):
+            return "SOLD (Out of Stock Overlay)"
+        # ----------------------------------------
+        
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
-        if any(b in page_title for b in bot_titles): return "ERROR (Inventory Sync Required)"
+        if any(b in page_title for b in bot_titles): return "ERROR (Cloudflare Bot Block)"
             
         meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
         if meta_refresh and meta_refresh.get('content'):
@@ -706,31 +738,12 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
-        # --- NEW: SOFT-SOLD / OVERLAY / JSON SCANNER ---
-        # This is your exact original scanner, just with the JSON phrases added to the list!
-        soft_sold_phrases = [
-            "no longer available",
-            "this vehicle is sold",
-            "vehicle has been sold",
-            "currently out of stock",
-            "schema.org/outofstock",     
-            "schema.org/soldout",        
-            '"inventorystatus":"sold"',  
-            '"inventorystatus": "sold"', 
-            '"vehiclestatus":"sold"',    
-            '"vehiclestatus": "sold"',
-            '"isavailable":false',
-            '"isavailable": false'
-        ]
-        if any(phrase in text_lower for phrase in soft_sold_phrases):
-            return "SOLD (Out of Stock Overlay)"
-        # ----------------------------------------
-            
         return "Available"
         
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
     except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
+
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
@@ -871,7 +884,7 @@ if st.session_state.current_report_id is not None:
                         d_domain = row['_base_domain']
                         d_blocked = row['Blocked Pages']
                         
-                        c1, c2, c3 = st.columns([3, 4, 2])
+                        c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
                         with c1:
                             st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
                         with c2:
@@ -903,6 +916,22 @@ if st.session_state.current_report_id is not None:
                                         st.error("Invalid API URL.")
                                 else:
                                     st.warning("Paste a URL first!")
+                        with c4:
+                            if st.button("🚫 Ignore", key=f"ign_{d_domain}", help="Click this if the dealership does not use Dealer Inspire. The app will remember not to prompt you again.", use_container_width=True):
+                                st.session_state.local_vault_updates[d_domain] = {
+                                    'app_id': 'IGNORE',
+                                    'api_key': 'IGNORE',
+                                    'index': 'IGNORE'
+                                }
+                                try:
+                                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': 'IGNORE', 'API Key': 'IGNORE', 'Index Name': 'IGNORE'}])
+                                    if vault_df is not None and gsheets_conn is not None:
+                                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                        st.cache_data.clear()
+                                except Exception:
+                                    pass
+                                st.rerun()
 
                     st.markdown("---")
                     st.markdown("**How to find the API URL:**")
@@ -956,9 +985,9 @@ if st.session_state.current_report_id is not None:
     if not sold_df.empty:
         avg_v = sold_df['Attributed Unique Visitors'].mean()
         missed_threshold = max(avg_v, min_visitors)
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)]
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
     else:
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)]
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
 
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
