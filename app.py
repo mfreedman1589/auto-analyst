@@ -656,22 +656,32 @@ def check_universal_status(url, session):
     if not year: return "N/A"
     
     try:
+        # --- STEALTH HEADERS UPGRADE ---
+        # Upgraded to mimic a real human browser and bypass Cloudflare/403 blocks
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
         }
         
-        response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        # Slightly increased timeout to allow firewalls to process the stealth headers
+        response = session.get(url, headers=headers, timeout=8, allow_redirects=True)
         
+        # 1. HTTP Error Checks
         if response.status_code in [403, 406, 429]:
             return f"ERROR (Inventory Sync Required: {response.status_code})"
             
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
             
+        # 2. Redirect Checks
         orig_base = url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         final_base = response.url.lower().split('?')[0].rstrip('/').replace('https://', '').replace('http://', '').replace('www.', '')
         
@@ -687,6 +697,7 @@ def check_universal_status(url, session):
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
         if any(b in page_title for b in bot_titles): return "ERROR (Inventory Sync Required)"
             
+        # 3. Meta & JS Redirect Checks
         meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
         if meta_refresh and meta_refresh.get('content'):
             content = meta_refresh['content']
@@ -706,7 +717,7 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
-        # --- 1. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
+        # --- 4. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
@@ -716,15 +727,14 @@ def check_universal_status(url, session):
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
 
-        # --- 2. THE NEW EDGE-CASE SCANNER (LAST RESORT) ---
-        # This ONLY runs if literally everything above it failed to find a "Sold" indicator.
+        # --- 5. THE NEW EDGE-CASE SCANNER (LAST RESORT) ---
+        # This ONLY triggers if nothing above it caught a Sold status or Error.
         text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
         json_sold_flags = [
             'availability:http://schema.org/outofstock',
             'availability:http://schema.org/soldout',
             'inventorystatus:sold',
             'vehiclestatus:sold',
-            'status:sold',
             'isavailable:false'
         ]
         
@@ -736,7 +746,7 @@ def check_universal_status(url, session):
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
     except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
     except Exception as e: return "Available"
-
+        
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
 
