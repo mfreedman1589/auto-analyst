@@ -681,8 +681,6 @@ def check_universal_status(url, session):
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
-        
-        # Explicitly setting text_lower ensures it doesn't throw a silent variable error
         text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
@@ -709,6 +707,7 @@ def check_universal_status(url, session):
         search_indicators = ['search', 'results', 'all vehicles', 'inventory']
         if any(x in page_title for x in search_indicators) and year not in page_title: return "SOLD (Soft Redirect)"
             
+        # --- 1. YOUR ORIGINAL TEXT OVERLAY SCANNER ---
         soft_sold_phrases = [
             "no longer available",
             "this vehicle is sold",
@@ -718,16 +717,10 @@ def check_universal_status(url, session):
         if any(phrase in text_lower for phrase in soft_sold_phrases):
             return "SOLD (Out of Stock Overlay)"
 
-        text_collapsed = text_lower.replace(" ", "").replace("\n", "").replace('"', '')
-        json_sold_flags = [
-            'availability:http://schema.org/outofstock',
-            'availability:http://schema.org/soldout',
-            'inventorystatus:sold',
-            'vehiclestatus:sold',
-            'isavailable:false'
-        ]
-        
-        if any(flag in text_collapsed for flag in json_sold_flags):
+        # --- 2. FAST REGEX SPA SCANNER (No CPU Bottleneck!) ---
+        # This replaces the memory-heavy text replacement with a blazing fast C-level regex.
+        # It catches the "hidden" JSON code immediately without delaying the network pool.
+        if re.search(r'availability["\'\s:]+http://schema\.org/(?:outofstock|soldout)|(?:inventory|vehicle)status["\'\s:]+sold|isavailable["\'\s:]+false', text_lower):
             return "SOLD (Hidden SPA / JSON Flag)"
             
         return "Available"
@@ -771,18 +764,16 @@ if run_analysis_clicked:
     st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
     progress_bar = st.progress(0)
     
+    # --- WORKERS AND POOL RESTORED TO 60 (FULL SPEED) ---
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-    
-    # --- POOL REDUCED TO 15 TO EVADE WAF BANS ---
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=15, pool_maxsize=15)
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     
     vdp_results = {}
     
-    # --- WORKERS REDUCED TO 15 TO EVADE WAF BANS ---
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
         future_to_url = {executor.submit(scan_url, url, session): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
