@@ -1,7 +1,8 @@
 streamlit
 pandas
 requests
-beautifulsoup4
 plotly
-fpdf2
+beautifulsoup4
+pytz
+fpdf
 st-gsheets-connection
