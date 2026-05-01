@@ -430,7 +430,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                      pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                      pdf.ln()
                  
-    return bytes(pdf.output())
+    pdf_out = pdf.output(dest='S')
+    return pdf_out.encode('latin-1') if isinstance(pdf_out, str) else bytes(pdf_out)
 
 # --- THE VALUATION ENGINE ---
 def estimate_value(row):
