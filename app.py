@@ -13,6 +13,7 @@ import pytz
 from fpdf import FPDF
 import io
 import os
+import random
 from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURATION & CUSTOM CSS ---
@@ -42,13 +43,7 @@ if 'global_usage_count' not in st.session_state:
 # --- THE DEALER API VAULT (Google Sheets Powered) ---
 FALLBACK_VAULT = {
     'hananiavw.com': {'app_id': 'YL5AFXM3DW', 'api_key': '59d32b7b5842f84284e044c7ca465498', 'index': 'volkswagenoforangepark-sbm0424_production_inventory'},
-    'hondasanmarcos.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'hondaofsanmarcos_production_inventory'},
-    'basilcars.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'basilautogroup_production_inventory'},
-    'joebasilchevrolet.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'joebasilchevy_production_inventory'},
-    'robertbasilcars.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'robertbasilbuickgmc_production_inventory'},
-    'basilresale.com': {'app_id': 'EHWUW84XVK', 'api_key': 'fb58227032e79f03b9b820cbaea7f8fb', 'index': 'basilresalesheridan_production_inventory'},
-    'basilmitsubishi.com': {'app_id': 'EQU6HXB6WG', 'api_key': 'da97ef494552f47ecc6f4706888d120', 'index': 'basilmitsubishi-winback0323_production_inventory'},
-    'basilfredonia.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'basilchevybuick_production_inventory'}
+    'hondasanmarcos.com': {'app_id': 'V3ZOVI2QFZ', 'api_key': 'ec7553dd56e6d4c8bb447a0240e7aab3', 'index': 'hondaofsanmarcos_production_inventory'}
 }
 
 def load_vault():
@@ -99,6 +94,14 @@ if not check_password():
 
 # --- PDF GENERATOR FUNCTION ---
 def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None, include_dealer_details=False):
+    # HELPER: Sanitizes scraped text so it doesn't crash the PDF encoder
+    def safe_str(text):
+        if pd.isna(text): return ""
+        text = str(text)
+        reps = {'“':'"', '”':'"', '‘':"'", '’':"'", '—':'-', '–':'-', '®':'', '™':'', '©':''}
+        for k, v in reps.items(): text = text.replace(k, v)
+        return text.encode('latin-1', 'ignore').decode('latin-1')
+
     pdf = FPDF()
     pdf.add_page()
     
@@ -111,7 +114,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         report_title = f"{df['Dealer'].iloc[0]} Intelligence Report"
 
     pdf.set_font("Arial", "B", 18)
-    pdf.cell(0, 15, report_title, ln=True, align="C")
+    pdf.cell(0, 15, safe_str(report_title), ln=True, align="C")
     
     pdf.set_font("Arial", "I", 10)
     pdf.cell(0, 8, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')} | Attribution Threshold: {metrics.get('min_visitors', 1)}+ VDP Visitors", ln=True, align="C")
@@ -154,7 +157,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         
         pdf.set_font("Arial", "", 8)
         for _, row in dealer_group.head(15).iterrows():
-            pdf.cell(50, 8, str(row['Dealer'])[:28], border=1)
+            pdf.cell(50, 8, safe_str(row['Dealer'])[:28], border=1)
             pdf.cell(18, 8, str(row['Total Visitors']), border=1)
             pdf.cell(15, 8, str(row['VDPs Shopped']), border=1)
             pdf.cell(15, 8, str(row['Units Sold']), border=1)
@@ -179,7 +182,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.set_font("Arial", "", 9)
     traffic_mix = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
     for _, row in traffic_mix.iterrows():
-        pdf.cell(100, 8, str(row['Category']), border=1)
+        pdf.cell(100, 8, safe_str(row['Category']), border=1)
         pdf.cell(40, 8, str(row['Attributed Unique Visitors']), border=1)
         pdf.ln()
     pdf.ln(5)
@@ -199,7 +202,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         sales_counts.columns = ['Type', 'Count']
         merged_sales = pd.merge(sales_mix, sales_counts, on='Type')
         for _, row in merged_sales.iterrows():
-            pdf.cell(70, 8, str(row['Type']), border=1)
+            pdf.cell(70, 8, safe_str(row['Type']), border=1)
             pdf.cell(35, 8, str(row['Count']), border=1)
             pdf.cell(35, 8, f"{row['Share']}%", border=1)
             pdf.ln()
@@ -220,7 +223,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         tier_counts.columns = ['Price Tier', 'Count']
         merged_tiers = pd.merge(tier_mix, tier_counts, on='Price Tier')
         for _, row in merged_tiers.iterrows():
-            pdf.cell(70, 8, str(row['Price Tier']), border=1)
+            pdf.cell(70, 8, safe_str(row['Price Tier']), border=1)
             pdf.cell(35, 8, str(row['Count']), border=1)
             pdf.cell(35, 8, f"{row['Share']}%", border=1)
             pdf.ln()
@@ -244,7 +247,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             pdf.ln()
             pdf.set_font("Arial", "", 9)
             for _, row in top_models.iterrows():
-                pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
                 pdf.cell(40, 8, str(row['Units Sold']), border=1)
                 pdf.ln()
             pdf.ln(5)
@@ -261,13 +264,13 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
         for _, row in top_sold.iterrows():
-            name = str(row['Vehicle Name'])[:35]
+            name = safe_str(row['Vehicle Name'])[:35]
             pdf.set_font("Arial", "", 9) 
             pdf.cell(80, 8, name, border=1)
-            pdf.cell(25, 8, str(row['Type']), border=1)
+            pdf.cell(25, 8, safe_str(row['Type']), border=1)
             pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
             pdf.set_font("Arial", "", 8)
-            pdf.cell(65, 8, str(row['VIN']), border=1)
+            pdf.cell(65, 8, safe_str(row['VIN']), border=1)
             pdf.ln()
     else:
         pdf.set_font("Arial", "", 9)
@@ -296,7 +299,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 pdf.ln()
                 pdf.set_font("Arial", "", 9)
                 for _, row in top_missed.iterrows():
-                    pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                    pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
                     pdf.cell(40, 8, str(row['Count']), border=1)
                     pdf.ln()
                 pdf.ln(5)
@@ -313,15 +316,15 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         if not missed_df.empty:
              top_missed_detail = missed_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
              for _, row in top_missed_detail.iterrows():
-                 name = str(row['Vehicle Name'])[:35]
+                 name = safe_str(row['Vehicle Name'])[:35]
                  url = str(row['Page Url'])
                  pdf.set_text_color(0, 0, 255) 
                  pdf.cell(85, 8, name, border=1, link=url)
                  pdf.set_text_color(0, 0, 0)
                  pdf.set_font("Arial", "", 8) 
-                 pdf.cell(65, 8, str(row['VIN']), border=1)
+                 pdf.cell(65, 8, safe_str(row['VIN']), border=1)
                  pdf.set_font("Arial", "", 9)
-                 pdf.cell(20, 8, str(row['Type']), border=1)
+                 pdf.cell(20, 8, safe_str(row['Type']), border=1)
                  pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                  pdf.ln()
                  
@@ -337,7 +340,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             pdf.add_page()
             pdf.set_font("Arial", "B", 14)
             pdf.set_fill_color(220, 220, 220)
-            pdf.cell(0, 10, f" Dealership Profile: {dealer}", ln=True, fill=True)
+            pdf.cell(0, 10, f" Dealership Profile: {safe_str(dealer)}", ln=True, fill=True)
             pdf.ln(5)
             
             if not dealer_sold.empty:
@@ -356,7 +359,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                     pdf.ln()
                     pdf.set_font("Arial", "", 9)
                     for _, row in d_top_models.iterrows():
-                        pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                        pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
                         pdf.cell(40, 8, str(row['Units Sold']), border=1)
                         pdf.ln()
                     pdf.ln(5)
@@ -377,7 +380,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                     pdf.ln()
                     pdf.set_font("Arial", "", 9)
                     for _, row in d_top_missed.iterrows():
-                        pdf.cell(100, 8, str(row['Make/Model']), border=1)
+                        pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
                         pdf.cell(40, 8, str(row['Count']), border=1)
                         pdf.ln()
                     pdf.ln(5)
@@ -393,13 +396,13 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 pdf.ln()
                 d_top_sold = dealer_sold.sort_values('Attributed Unique Visitors', ascending=False).head(10)
                 for _, row in d_top_sold.iterrows():
-                    name = str(row['Vehicle Name'])[:35]
+                    name = safe_str(row['Vehicle Name'])[:35]
                     pdf.set_font("Arial", "", 9) 
                     pdf.cell(80, 8, name, border=1)
-                    pdf.cell(25, 8, str(row['Type']), border=1)
+                    pdf.cell(25, 8, safe_str(row['Type']), border=1)
                     pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                     pdf.set_font("Arial", "", 8)
-                    pdf.cell(65, 8, str(row['VIN']), border=1)
+                    pdf.cell(65, 8, safe_str(row['VIN']), border=1)
                     pdf.ln()
                 pdf.ln(5)
 
@@ -415,19 +418,20 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 d_top_missed_detail = dealer_missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
                 pdf.set_font("Arial", "", 9)
                 for _, row in d_top_missed_detail.iterrows():
-                     name = str(row['Vehicle Name'])[:35]
+                     name = safe_str(row['Vehicle Name'])[:35]
                      url = str(row['Page Url'])
                      pdf.set_text_color(0, 0, 255) 
                      pdf.cell(85, 8, name, border=1, link=url)
                      pdf.set_text_color(0, 0, 0)
                      pdf.set_font("Arial", "", 8) 
-                     pdf.cell(65, 8, str(row['VIN']), border=1)
+                     pdf.cell(65, 8, safe_str(row['VIN']), border=1)
                      pdf.set_font("Arial", "", 9)
-                     pdf.cell(20, 8, str(row['Type']), border=1)
+                     pdf.cell(20, 8, safe_str(row['Type']), border=1)
                      pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                      pdf.ln()
                  
-    return bytes(pdf.output())
+    pdf_out = pdf.output(dest='S')
+    return pdf_out.encode('latin-1') if isinstance(pdf_out, str) else bytes(pdf_out)
 
 # --- THE VALUATION ENGINE ---
 def estimate_value(row):
@@ -620,7 +624,7 @@ def scan_url(url, session):
     
     app_id, api_key, index_name = None, None, None
     
-    if vault_config:
+    if vault_config and isinstance(vault_config, dict) and vault_config.get('app_id') != 'IGNORE':
         app_id = vault_config['app_id']
         api_key = vault_config['api_key']
         index_name = vault_config['index']
@@ -651,23 +655,35 @@ def scan_url(url, session):
         return check_universal_status(url, session)
 
 def check_universal_status(url, session):
+    url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
     
+    # WAF EVASION HEADERS
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
+    ]
+    
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': random.choice(user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
         }
         
         response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
         if response.status_code in [403, 406, 429]:
-            return f"ERROR (Inventory Sync Required: {response.status_code})"
+            return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
         if response.status_code in [404, 410]:
             return "SOLD (404 Error)"
@@ -680,11 +696,31 @@ def check_universal_status(url, session):
             if year not in final_base: return "SOLD (HTTP Redirect)"
 
         text = response.text 
+        text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
         
+        # --- SOFT-SOLD / OVERLAY / JSON SCANNER ---
+        soft_sold_phrases = [
+            "no longer available",
+            "this vehicle is sold",
+            "vehicle has been sold",
+            "currently out of stock",
+            "schema.org/outofstock",     
+            "schema.org/soldout",        
+            '"inventorystatus":"sold"',  
+            '"inventorystatus": "sold"', 
+            '"vehiclestatus":"sold"',    
+            '"vehiclestatus": "sold"',
+            '"isavailable":false',
+            '"isavailable": false'
+        ]
+        if any(phrase in text_lower for phrase in soft_sold_phrases):
+            return "SOLD (Out of Stock Overlay)"
+        # ----------------------------------------
+        
         bot_titles = ['just a moment', 'attention required', 'verify you are human', 'access denied', 'pardon our interruption', 'security check']
-        if any(b in page_title for b in bot_titles): return "ERROR (Inventory Sync Required)"
+        if any(b in page_title for b in bot_titles): return "ERROR (Cloudflare Bot Block)"
             
         meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'^refresh$', re.I)})
         if meta_refresh and meta_refresh.get('content'):
@@ -724,6 +760,41 @@ if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
+# --- NEW: QUICK ADD TO VAULT ---
+with st.sidebar.expander("🔐 Quick Add to Vault", expanded=False):
+    st.markdown("<span style='font-size: 0.85em; color: #555;'>Manually sync a Dealer Inspire site without running a report.</span>", unsafe_allow_html=True)
+    qd_domain = st.text_input("Dealer Domain", placeholder="e.g., pittstoyota.com", key="qd_domain")
+    qd_url = st.text_area("Algolia API URL", placeholder="Paste full URL here...", key="qd_url", height=100)
+    
+    if st.button("💾 Save to Vault", use_container_width=True):
+        if qd_domain and qd_url:
+            d_domain = qd_domain.replace('www.', '').replace('https://', '').replace('http://', '').strip().strip('/')
+            val = qd_url
+            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
+            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
+            # This regex captures both /query and /queries safely
+            index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val) 
+            
+            if app_id_match and api_key_match and index_match:
+                st.session_state.local_vault_updates[d_domain] = {
+                    'app_id': app_id_match.group(1),
+                    'api_key': api_key_match.group(1),
+                    'index': index_match.group(1)
+                }
+                try:
+                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id_match.group(1), 'API Key': api_key_match.group(1), 'Index Name': index_match.group(1)}])
+                    if vault_df is not None and gsheets_conn is not None:
+                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                        st.cache_data.clear()
+                except Exception:
+                    pass
+                st.success(f"✅ {d_domain} instantly synced!")
+            else:
+                st.error("Invalid API URL. Check the format.")
+        else:
+            st.warning("Please fill both fields.")
+
 # Main Execution Logic
 if run_analysis_clicked:
     df_raw = pd.read_csv(uploaded_file)
@@ -755,7 +826,7 @@ if run_analysis_clicked:
     
     vdp_results = {}
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=60) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {executor.submit(scan_url, url, session): url for url in vdp_urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
@@ -851,7 +922,7 @@ if st.session_state.current_report_id is not None:
                         d_domain = row['_base_domain']
                         d_blocked = row['Blocked Pages']
                         
-                        c1, c2, c3 = st.columns([3, 4, 2])
+                        c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
                         with c1:
                             st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
                         with c2:
@@ -862,7 +933,7 @@ if st.session_state.current_report_id is not None:
                                 if val:
                                     app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
                                     api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
-                                    index_match = re.search(r'/indexes/([^/]+)/query', val)
+                                    index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val)
                                     
                                     if app_id_match and api_key_match and index_match:
                                         st.session_state.local_vault_updates[d_domain] = {
@@ -883,6 +954,22 @@ if st.session_state.current_report_id is not None:
                                         st.error("Invalid API URL.")
                                 else:
                                     st.warning("Paste a URL first!")
+                        with c4:
+                            if st.button("🚫 Ignore", key=f"ign_{d_domain}", help="Click this if the dealership does not use Dealer Inspire. The app will remember not to prompt you again.", use_container_width=True):
+                                st.session_state.local_vault_updates[d_domain] = {
+                                    'app_id': 'IGNORE',
+                                    'api_key': 'IGNORE',
+                                    'index': 'IGNORE'
+                                }
+                                try:
+                                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': 'IGNORE', 'API Key': 'IGNORE', 'Index Name': 'IGNORE'}])
+                                    if vault_df is not None and gsheets_conn is not None:
+                                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                        st.cache_data.clear()
+                                except Exception:
+                                    pass
+                                st.rerun()
 
                     st.markdown("---")
                     st.markdown("**How to find the API URL:**")
@@ -936,9 +1023,9 @@ if st.session_state.current_report_id is not None:
     if not sold_df.empty:
         avg_v = sold_df['Attributed Unique Visitors'].mean()
         missed_threshold = max(avg_v, min_visitors)
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)]
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
     else:
-        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)]
+        missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
 
     st.markdown("### 📊 Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
@@ -1173,9 +1260,10 @@ if st.session_state.current_report_id is not None:
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
     st.markdown("---")
-    st.markdown("### 🚀 Version 3.0 Updates")
-    st.markdown("Welcome to the latest version of the Auto-Sales Intelligence Agent! Here is what's new:")
-    st.markdown("1. **🏢 Auto Group & Tier 2 Recognition:** Automatically detects multi-dealer reports and generates a clean, dealership-by-dealership sales breakdown.")
-    st.markdown("2. **🎯 Interactive VDP Filter:** A new real-time slider that lets you filter attributed sales based on the number of VDP visits we drove, helping you prove high-intent demand.")
-    st.markdown("3. **⚙️ Automated Dealer Sync (The Vault):** If a dealer's inventory is hidden behind a security provider, the app now generates a built-in guide to easily sync their API. Once saved, the tool remembers it forever!")
-    st.markdown("4. **📈 Online Conversions Tracking:** Form submissions and appointment bookings are now recognized and displayed in the Traffic Mix!")
+    st.markdown("### 🚀 Version 4.0 Updates")
+    st.markdown("Welcome to the latest version of the Auto-Sales Intelligence Agent! Here is what's new for your workflow:")
+    st.markdown("1. **⚡ Faster Dealership Setup:** A new 'Quick Add' tool in the sidebar lets you instantly connect a dealership's hidden inventory without waiting to run a full report first.")
+    st.markdown("2. **📄 Bulletproof PDF Exports:** Exporting is now rock-solid. We fixed an issue where fancy formatting (like ™ or ® symbols) in a car's name would crash the PDF downloads.")
+    st.markdown("3. **🛡️ Uninterrupted Scanning:** The tool is now much better at bypassing strict dealership security firewalls, resulting in fewer 'Blocked' errors and faster results.")
+    st.markdown("4. **🏷️ Catching 'Hidden' Sales:** Dealerships often leave sold cars on their site for SEO but mark them 'Out of Stock.' The tool now reads the fine print and rightfully counts these as sold.")
+    st.markdown("5. **🏢 Auto Group Dashboards & Live Filters:** Uploading a multi-site Auto Group report now automatically generates a clean, store-by-store breakdown. Plus, a new interactive slider lets you adjust traffic thresholds on the fly to prove high conversion velocity to your clients.")
