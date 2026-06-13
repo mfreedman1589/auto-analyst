@@ -760,40 +760,71 @@ if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
-# --- NEW: QUICK ADD TO VAULT ---
+# --- NEW: UNIVERSAL QUICK ADD TO VAULT ---
 with st.sidebar.expander("🔐 Quick Add to Vault", expanded=False):
-    st.markdown("<span style='font-size: 0.85em; color: #555;'>Manually sync a Dealer Inspire site without running a report.</span>", unsafe_allow_html=True)
-    qd_domain = st.text_input("Dealer Domain", placeholder="e.g., pittstoyota.com", key="qd_domain")
-    qd_url = st.text_area("Algolia API URL", placeholder="Paste full URL here...", key="qd_url", height=100)
+    st.markdown("<span style='font-size: 0.85em; color: #555;'>Manually sync a Dealer Inspire site dynamically.</span>", unsafe_allow_html=True)
+    qd_domain = st.text_input("Dealer Domain", placeholder="e.g., hamby.com", key="qd_domain")
+    
+    st.markdown("""
+    <div style='background-color: #f8f9fa; border-left: 4px solid #1E88E5; padding: 10px; font-size: 12px; margin-bottom: 5px; border-radius: 3px;'>
+    <b>HOW TO FIND THE CODE:</b><br>
+    <b>Plan A:</b> Inventory page ➔ Inspect ➔ Network. Check 'Disable cache', filter by <code>algolia</code>, refresh. Copy URL ending in <code>query?</code>.<br>
+    <b>Plan B:</b> Right-click site ➔ <i>View Page Source</i>. Press <b>Ctrl+F</b> and search <code>appId</code>. Highlight that entire sentence and copy it.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    qd_raw = st.text_area("Universal Paste Box", placeholder="Paste the Algolia URL or Source Code block here...", key="qd_raw", height=80)
+    qd_index = st.text_input("Index Name (Optional)", placeholder="Only if missing above", key="qd_index")
     
     if st.button("💾 Save to Vault", use_container_width=True):
-        if qd_domain and qd_url:
+        if qd_domain and qd_raw:
             d_domain = qd_domain.replace('www.', '').replace('https://', '').replace('http://', '').strip().strip('/')
-            val = qd_url
-            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
-            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
-            # This regex captures both /query and /queries safely
-            index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val) 
+            val = qd_raw
             
-            if app_id_match and api_key_match and index_match:
-                st.session_state.local_vault_updates[d_domain] = {
-                    'app_id': app_id_match.group(1),
-                    'api_key': api_key_match.group(1),
-                    'index': index_match.group(1)
-                }
+            # Universal Extraction Logic
+            app_id, api_key, index_name = None, None, None
+            
+            id_url = re.search(r'x-algolia-application-id=([^&]+)', val)
+            id_json = re.search(r'"appId"[\s:]*"([^"]+)"', val)
+            if id_url: app_id = id_url.group(1)
+            elif id_json: app_id = id_json.group(1)
+            
+            key_url = re.search(r'x-algolia-api-key=([^&]+)', val)
+            key_json = re.search(r'"apiKey[^"]*"[\s:]*"([^"]+)"', val, re.IGNORECASE)
+            if key_url: api_key = key_url.group(1)
+            elif key_json: api_key = key_json.group(1)
+            
+            if qd_index.strip():
+                index_name = qd_index.strip()
+            else:
+                idx_url = re.search(r'/indexes/([^/]+)/(?:query|queries)', val)
+                idx_inv_json = re.search(r'"inventoryIndex"[\s:]*"([^"]+)"', val)
+                idx_json = re.search(r'"indexName"[\s:]*"([^"]+)"', val)
+                
+                if idx_url and idx_url.group(1) != '*': index_name = idx_url.group(1)
+                elif idx_inv_json: index_name = idx_inv_json.group(1)
+                elif idx_json: index_name = idx_json.group(1)
+                
+            if index_name and index_name.endswith('_content'):
+                index_name = index_name.replace('_content', '_inventory')
+
+            if app_id and api_key and index_name:
+                st.session_state.local_vault_updates[d_domain] = {'app_id': app_id, 'api_key': api_key, 'index': index_name}
                 try:
-                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id_match.group(1), 'API Key': api_key_match.group(1), 'Index Name': index_match.group(1)}])
+                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': index_name}])
                     if vault_df is not None and gsheets_conn is not None:
                         updated_df = pd.concat([vault_df, new_row], ignore_index=True)
                         gsheets_conn.update(worksheet="Sheet1", data=updated_df)
                         st.cache_data.clear()
-                except Exception:
-                    pass
+                except Exception: pass
+                
+                # INSTANT VALIDATION TRIGGER
                 st.success(f"✅ {d_domain} instantly synced!")
+                st.rerun()
             else:
-                st.error("Invalid API URL. Check the format.")
+                st.error("Missing info. Could not find App ID, API Key, or Index Name.")
         else:
-            st.warning("Please fill both fields.")
+            st.warning("Please fill the Domain and Universal Paste boxes.")
 
 # Main Execution Logic
 if run_analysis_clicked:
@@ -916,61 +947,86 @@ if st.session_state.current_report_id is not None:
                 with st.expander(alert_text, expanded=True):
                     st.markdown("We need a little help syncing with the inventory databases for the following dealerships. Follow the simple steps below to map their API to your permanent Vault and reveal true sales data!")
                     
-                    st.markdown("---")
-                    for _, row in pending_blocks.iterrows():
-                        d_name = row['Dealer']
-                        d_domain = row['_base_domain']
-                        d_blocked = row['Blocked Pages']
-                        
-                        c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
-                        with c1:
-                            st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
-                        with c2:
-                            st.text_input(f"API URL for {d_domain}", key=f"inp_{d_domain}", label_visibility="collapsed", placeholder="Paste API URL here...")
-                        with c3:
-                            if st.button("💾 Save", key=f"btn_{d_domain}", use_container_width=True):
-                                val = st.session_state[f"inp_{d_domain}"]
-                                if val:
-                                    app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
-                                    api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
-                                    index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val)
-                                    
-                                    if app_id_match and api_key_match and index_match:
-                                        st.session_state.local_vault_updates[d_domain] = {
-                                            'app_id': app_id_match.group(1),
-                                            'api_key': api_key_match.group(1),
-                                            'index': index_match.group(1)
-                                        }
-                                        try:
-                                            new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id_match.group(1), 'API Key': api_key_match.group(1), 'Index Name': index_match.group(1)}])
-                                            if vault_df is not None and gsheets_conn is not None:
-                                                updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                                                gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                                                st.cache_data.clear()
-                                        except Exception:
-                                            pass
-                                        st.rerun()
-                                    else:
-                                        st.error("Invalid API URL.")
+                st.markdown("---")
+                for _, row in pending_blocks.iterrows():
+                    d_name = row['Dealer']
+                    d_domain = row['_base_domain']
+                    d_blocked = row['Blocked Pages']
+                    
+                    st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen vehicles)*")
+                    
+                    # THE TEAM CHEAT SHEET
+                    st.markdown("""
+                    <div style='background-color: #f8f9fa; border-left: 4px solid #1E88E5; padding: 10px; font-size: 13px; margin-bottom: 5px; border-radius: 3px;'>
+                    <b>HOW TO FIND THE CODE:</b><br>
+                    <b>Plan A:</b> Inventory page ➔ Inspect ➔ Network. Check 'Disable cache', filter by <code>algolia</code>, refresh. Copy URL ending in <code>query?</code>.<br>
+                    <b>Plan B:</b> Right-click site background ➔ <i>View Page Source</i>. Press <b>Ctrl+F</b> and search <code>appId</code>. Highlight that entire sentence of code and copy it.
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    c1, c2, c3, c4 = st.columns([4, 1.5, 1.5, 1])
+                    with c1:
+                        st.text_input(f"Universal Paste Box", key=f"inp_{d_domain}", label_visibility="collapsed", placeholder="Paste Algolia URL or Source Code block here...")
+                    with c2:
+                        st.text_input(f"Index Name (Optional)", key=f"idx_{d_domain}", label_visibility="collapsed", placeholder="Index Name (Optional)")
+                    with c3:
+                        if st.button("💾 Save to Vault", key=f"btn_{d_domain}", use_container_width=True):
+                            val = st.session_state.get(f"inp_{d_domain}", "")
+                            manual_idx = st.session_state.get(f"idx_{d_domain}", "").strip()
+                            
+                            if val:
+                                # --- Universal Extraction Logic ---
+                                app_id, api_key, index_name = None, None, None
+                                
+                                id_url = re.search(r'x-algolia-application-id=([^&]+)', val)
+                                id_json = re.search(r'"appId"[\s:]*"([^"]+)"', val)
+                                if id_url: app_id = id_url.group(1)
+                                elif id_json: app_id = id_json.group(1)
+                                
+                                key_url = re.search(r'x-algolia-api-key=([^&]+)', val)
+                                key_json = re.search(r'"apiKey[^"]*"[\s:]*"([^"]+)"', val, re.IGNORECASE)
+                                if key_url: api_key = key_url.group(1)
+                                elif key_json: api_key = key_json.group(1)
+                                
+                                if manual_idx:
+                                    index_name = manual_idx
                                 else:
-                                    st.warning("Paste a URL first!")
-                        with c4:
-                            if st.button("🚫 Ignore", key=f"ign_{d_domain}", help="Click this if the dealership does not use Dealer Inspire. The app will remember not to prompt you again.", use_container_width=True):
-                                st.session_state.local_vault_updates[d_domain] = {
-                                    'app_id': 'IGNORE',
-                                    'api_key': 'IGNORE',
-                                    'index': 'IGNORE'
-                                }
-                                try:
-                                    new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': 'IGNORE', 'API Key': 'IGNORE', 'Index Name': 'IGNORE'}])
-                                    if vault_df is not None and gsheets_conn is not None:
-                                        updated_df = pd.concat([vault_df, new_row], ignore_index=True)
-                                        gsheets_conn.update(worksheet="Sheet1", data=updated_df)
-                                        st.cache_data.clear()
-                                except Exception:
-                                    pass
-                                st.rerun()
-
+                                    idx_url = re.search(r'/indexes/([^/]+)/(?:query|queries)', val)
+                                    idx_inv_json = re.search(r'"inventoryIndex"[\s:]*"([^"]+)"', val)
+                                    idx_json = re.search(r'"indexName"[\s:]*"([^"]+)"', val)
+                                    
+                                    if idx_url and idx_url.group(1) != '*': index_name = idx_url.group(1)
+                                    elif idx_inv_json: index_name = idx_inv_json.group(1)
+                                    elif idx_json: index_name = idx_json.group(1)
+                                    
+                                if index_name and index_name.endswith('_content'):
+                                    index_name = index_name.replace('_content', '_inventory')
+    
+                                if app_id and api_key and index_name:
+                                    st.session_state.local_vault_updates[d_domain] = {
+                                        'app_id': app_id,
+                                        'api_key': api_key,
+                                        'index': index_name
+                                    }
+                                    try:
+                                        new_row = pd.DataFrame([{'Base Domain': d_domain, 'App ID': app_id, 'API Key': api_key, 'Index Name': index_name}])
+                                        if vault_df is not None and gsheets_conn is not None:
+                                            updated_df = pd.concat([vault_df, new_row], ignore_index=True)
+                                            gsheets_conn.update(worksheet="Sheet1", data=updated_df)
+                                            st.cache_data.clear()
+                                    except Exception:
+                                        pass
+                                    
+                                    # INSTANT VALIDATION TRIGGER
+                                    st.rerun()
+                                else:
+                                    st.error("Missing Data. Check code/URL.")
+                            else:
+                                st.warning("Please paste URL or code.")
+                    with c4:
+                        if st.button("🚫 Ignore", key=f"ign_{d_domain}", use_container_width=True):
+                            st.session_state.ignored_domains.add(d_domain)
+                            st.rerun()
                     st.markdown("---")
                     st.markdown("**How to find the API URL:**")
                     st.markdown("1. Click the dealer link above to open their site in a new tab.\n2. Right-click anywhere on their page and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`. Click the result starting with **`query?`** (it will contain 'algolia' in the URL). Right-click it and select **Copy URL**.")
