@@ -629,7 +629,7 @@ def scan_url(url, session):
         api_key = vault_config['api_key']
         index_name = vault_config['index']
             
-    if app_id:
+    if app_id and app_id.upper() != 'IGNORE':
         parsed_url = urlparse(str(url))
         base_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
         
