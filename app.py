@@ -15,6 +15,7 @@ from fpdf import FPDF
 import io
 import os
 import html
+import time
 import random
 import threading
 from streamlit_gsheets import GSheetsConnection
@@ -944,6 +945,27 @@ def scan_url(url, session, ignored_domains, ignore_lock):
     # Any non-200 -> fall back to the scraper instead of returning an ERROR.
     return check_universal_status(url, session)
 
+# --- SCRAPER THROTTLE ---------------------------------------------------
+# A single IP firing 30 concurrent requests trips a dealer's firewall rate
+# limiter, which is why ~72% of pages come back 403. We cap how many requests
+# hit ANY ONE domain at a time (via per-domain semaphores) and add small jitter.
+# Multi-dealer reports still run fast because different domains proceed in
+# parallel — only same-domain bursts are slowed. Reset at the start of each run.
+SCRAPER_THROTTLE = {
+    'sems': {},                       # domain -> threading.Semaphore
+    'lock': threading.Lock(),
+    'max_per_domain': 4,              # concurrent requests allowed per domain
+}
+
+def _domain_gate(domain):
+    """Get (creating if needed) the concurrency semaphore for a domain."""
+    with SCRAPER_THROTTLE['lock']:
+        sem = SCRAPER_THROTTLE['sems'].get(domain)
+        if sem is None:
+            sem = threading.Semaphore(SCRAPER_THROTTLE['max_per_domain'])
+            SCRAPER_THROTTLE['sems'][domain] = sem
+        return sem
+
 def check_universal_status(url, session):
     url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
@@ -970,16 +992,33 @@ def check_universal_status(url, session):
             'Sec-Fetch-User': '?1'
         }
         
-        if HAS_CFFI:
-            # Real Chrome TLS fingerprint — the disguise plain requests can't wear.
-            # impersonate handles headers + JA3/JA4, so no manual header dict needed.
-            response = cffi_requests.get(
-                url, impersonate="chrome", timeout=10, allow_redirects=True
-            )
-        else:
-            response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
-        
-        if response.status_code in [403, 406, 429]:
+        domain = urlparse(url).netloc.replace('www.', '').lower()
+
+        def _do_fetch(profile):
+            if HAS_CFFI:
+                return cffi_requests.get(url, impersonate=profile, timeout=12, allow_redirects=True)
+            return session.get(url, headers=headers, timeout=8, allow_redirects=True)
+
+        # Throttle per-domain: only a few requests hit one dealer at a time,
+        # with jitter, plus one backoff retry (fresh fingerprint) on a block.
+        response = None
+        profiles = ["chrome", "chrome131"]
+        with _domain_gate(domain):
+            for attempt in range(2):
+                time.sleep(random.uniform(0.15, 0.7))  # jitter to break up bursts
+                try:
+                    response = _do_fetch(profiles[attempt])
+                except Exception:
+                    if attempt == 0:
+                        time.sleep(random.uniform(1.0, 2.0))
+                        continue
+                    raise
+                if response.status_code in (403, 406, 429) and attempt == 0:
+                    time.sleep(random.uniform(1.5, 3.5))  # back off, then retry once
+                    continue
+                break
+
+        if response is not None and response.status_code in [403, 406, 429]:
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
         if response.status_code in [404, 410]:
@@ -1215,6 +1254,10 @@ if run_analysis_clicked:
     # domain lands here, every remaining VDP for it skips the API entirely.
     ignored_domains = set()
     ignore_lock = threading.Lock()
+
+    # Fresh throttle state each run (per-domain semaphores from a prior run
+    # shouldn't carry over).
+    SCRAPER_THROTTLE['sems'] = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {
