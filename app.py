@@ -189,7 +189,7 @@ def parse_algolia_credentials(text, fallback_domain=""):
         m = re.search(r'x-algolia-application-id=([A-Za-z0-9]+)', text)
         if m: app_id = m.group(1)
     if not api_key:
-        m = re.search(r'x-algolia-api-key=([a-f0-9]{32})', text, re.I)
+        m = re.search(r'x-algolia-api-key=([^&\s"\']{20,})', text, re.I)
         if m: api_key = m.group(1)
     if not index:
         m = re.search(r'/indexes/([^/?"\']+)/(?:query|queries)', text)
@@ -201,7 +201,7 @@ def parse_algolia_credentials(text, fallback_domain=""):
              or re.search(r'(?:application-?id|appid|app_id)["\'\s:=]+([A-Z0-9]{10})', text, re.I))
         if m: app_id = m.group(1).upper()
     if not api_key:
-        m = re.search(r'(?:api-?key|apikey|api_key|searchapikey)["\'\s:=]+([a-f0-9]{32})', text, re.I)
+        m = re.search(r'(?:x-algolia-api-key|algolia[_-]?api[_-]?key|api[_-]?key|apikey|searchapikey|search[_-]?key)["\'\s:=]+["\']?([A-Za-z0-9+/=_-]{20,})', text, re.I)
         if m: api_key = m.group(1)
     if not index:
         m = (re.search(r'["\']?index(?:name)?["\']?\s*[:=]\s*["\']([a-z0-9_\-]*inventory[a-z0-9_\-]*)["\']', text, re.I)
@@ -250,25 +250,35 @@ def autodetect_algolia(domain):
     return parse_algolia_credentials(blob, fallback_domain=domain)
 
 # One-click bookmarklet: runs in the salesperson's OWN browser (no firewall can
-# block it), scrapes the Algolia creds from the live page, and copies a clean
-# "domain|appId|apiKey|index" line to the clipboard for pasting into the Vault.
+# block it). It scrapes App ID + Index from the page AND hooks the network layer
+# to capture the Search Key from a live Algolia request (many dealers only send
+# the key as a request header when a search actually runs — not in the page HTML).
+# Flow: click once to arm + scan. If the key isn't in the page, type a letter in
+# the dealer's inventory search box, then click the bookmark again to grab it.
 BOOKMARKLET_JS = (
     "javascript:(function(){try{"
-    "var b=document.documentElement.innerHTML+'\\n'+"
-    "Array.prototype.map.call(document.scripts,function(s){return s.textContent||''}).join('\\n');"
+    "var W=window;"
+    "if(!W.__ffArmed){W.__ffArmed=1;"
+    "W.__ffKeys={app:'',key:'',idx:'',dom:location.hostname.replace(/^www\\./,'')};"
+    "var b=document.documentElement.innerHTML+'\\n'+Array.prototype.map.call(document.scripts,function(s){return s.textContent||''}).join('\\n');"
     "try{b+='\\n'+performance.getEntriesByType('resource').map(function(e){return e.name}).join('\\n')}catch(e){}"
-    "function m(r){var x=b.match(r);return x?x[1]:''}"
-    "var a=m(/([A-Z0-9]{10})-dsn\\.algolia\\.net/)||m(/(?:application-?id|appid|app_id)[\"'\\s:=]+([A-Z0-9]{10})/i);"
-    "var k=m(/(?:api-?key|apikey|api_key|searchapikey)[\"'\\s:=]+([a-f0-9]{32})/i);"
-    "var i=m(/[\"']?index(?:name)?[\"']?\\s*[:=]\\s*[\"']([a-z0-9_\\-]*inventory[a-z0-9_\\-]*)[\"']/i)"
-    "||m(/([a-z0-9][a-z0-9_\\-]*_production_inventory[a-z0-9_]*)/i);"
-    "var d=location.hostname.replace(/^www\\./,'');"
-    "var o=[d,a,k,i].join('|');"
-    "if(!a||!k||!i){window.prompt('Could not find all 3 keys on this page. Partial result (copy if useful):',o);return}"
-    "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(o).then("
-    "function(){window.prompt('COPIED! Paste this into the Vault:',o)},"
-    "function(){window.prompt('Copy this line into the Vault:',o)})}"
+    "function M(r){var x=b.match(r);return x?x[1]:''}"
+    "W.__ffKeys.app=M(/([A-Z0-9]{10})-dsn\\.algolia\\.net/)||M(/(?:application-?id|appid|app_id)[\"'\\s:=]+([A-Z0-9]{10})/i);"
+    "W.__ffKeys.idx=M(/[\"']?index(?:name)?[\"']?\\s*[:=]\\s*[\"']([a-z0-9_\\-]*inventory[a-z0-9_\\-]*)[\"']/i)||M(/([a-z0-9][a-z0-9_\\-]*_production_inventory[a-z0-9_]*)/i);"
+    "var k0=M(/(?:x-algolia-api-key|api-?key|apikey|searchapikey)[\"'\\s:=]+[\"']?([A-Za-z0-9+\\/=_-]{20,})/i);if(k0)W.__ffKeys.key=k0;"
+    "if(!W.__ffKeys.key){var ku=b.match(/x-algolia-api-key=([^&\\s\"']+)/i);if(ku)W.__ffKeys.key=decodeURIComponent(ku[1])}"
+    "var oO=XMLHttpRequest.prototype.open,oS=XMLHttpRequest.prototype.setRequestHeader;"
+    "XMLHttpRequest.prototype.open=function(m,u){try{if(/algolia/i.test(u)){var a=String(u).match(/([A-Z0-9]{10})-dsn/);if(a&&!W.__ffKeys.app)W.__ffKeys.app=a[1];var k=String(u).match(/x-algolia-api-key=([^&]+)/i);if(k)W.__ffKeys.key=decodeURIComponent(k[1])}}catch(e){}return oO.apply(this,arguments)};"
+    "XMLHttpRequest.prototype.setRequestHeader=function(h,v){try{var H=String(h).toLowerCase();if(H=='x-algolia-api-key')W.__ffKeys.key=v;if(H=='x-algolia-application-id'&&v)W.__ffKeys.app=v}catch(e){}return oS.apply(this,arguments)};"
+    "var oF=W.fetch;if(oF){W.fetch=function(res,opt){try{var u=(res&&res.url)||res;if(/algolia/i.test(String(u))){var a=String(u).match(/([A-Z0-9]{10})-dsn/);if(a&&!W.__ffKeys.app)W.__ffKeys.app=a[1];var k=String(u).match(/x-algolia-api-key=([^&]+)/i);if(k)W.__ffKeys.key=decodeURIComponent(k[1])}if(opt&&opt.headers){var H=opt.headers;var g=function(n){try{return H.get?H.get(n):(H[n]||H[n.toLowerCase()])}catch(e){return''}};var kk=g('x-algolia-api-key');if(kk)W.__ffKeys.key=kk;var ap=g('x-algolia-application-id');if(ap)W.__ffKeys.app=ap}}catch(e){}return oF.apply(this,arguments)}}"
+    "}"
+    "var F=W.__ffKeys;var o=[F.dom,F.app,F.key,F.idx].join('|');"
+    "if(F.app&&F.key&&F.idx){"
+    "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(o).then(function(){window.prompt('COPIED! Paste this into the Vault:',o)},function(){window.prompt('Copy this line into the Vault:',o)})}"
     "else{window.prompt('Copy this line into the Vault:',o)}"
+    "}else{"
+    "window.prompt('Almost! Got the App ID + Index, but not the Search Key yet.\\n\\nType any letter into THIS dealer\\'s inventory SEARCH box so a live search runs, then click this bookmark AGAIN.\\n\\n(Partial result - do not paste yet:)',o)"
+    "}"
     "}catch(e){alert('Bookmarklet error: '+e.message)}})();"
 )
 
@@ -1047,8 +1057,9 @@ with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
 
         st.markdown(
             "<span style='font-size:0.85em;color:#555;'>"
-            "<b>Every time:</b> open the dealer's website → click your <b>Get Dealer Keys</b> bookmark → "
-            "it copies a line → paste it below and Save."
+            "<b>Every time:</b> open the dealer's website → click your <b>Get Dealer Keys</b> bookmark. "
+            "If it says the Search Key is missing, type any letter in the dealer's inventory search box "
+            "so a search runs, then click the bookmark <b>again</b>. It copies a line → paste it below and Save."
             "</span>", unsafe_allow_html=True)
 
         with st.popover("Can't drag it? Copy the code instead"):
@@ -1215,58 +1226,94 @@ if st.session_state.current_report_id is not None:
                 alert_text = f"⚙️ Action Required: Sync Inventory Database{'s' if severe_count > 1 else ''} ({severe_count} Remaining)"
                 
                 with st.expander(alert_text, expanded=True):
-                    st.markdown("We need a little help syncing with the inventory databases for the following dealerships. Follow the simple steps below to map their API to your permanent Vault and reveal true sales data!")
-                    
+                    st.markdown("A few dealers hid their inventory behind a firewall. Sync them below to reveal true sales — easiest method first.")
+
                     st.markdown("---")
                     for _, row in pending_blocks.iterrows():
                         d_name = row['Dealer']
                         d_domain = row['_base_domain']
                         d_blocked = row['Blocked Pages']
-                        
-                        c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
-                        with c1:
-                            st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
-                        with c2:
-                            st.text_input(f"API URL for {d_domain}", key=f"inp_{d_domain}", label_visibility="collapsed", placeholder="Paste API URL here...")
-                        with c3:
+
+                        st.markdown(f"👉 **[{d_name}](https://www.{d_domain})** *({d_blocked} unseen pages)*")
+                        ca, cb = st.columns([5, 1])
+                        with ca:
+                            st.text_input(f"Keys for {d_domain}", key=f"inp_{d_domain}",
+                                          label_visibility="collapsed",
+                                          placeholder="Paste the line from the 🔑 bookmark (or an Algolia URL)...")
+                        with cb:
                             if st.button("💾 Save", key=f"btn_{d_domain}", use_container_width=True):
                                 val = st.session_state[f"inp_{d_domain}"]
                                 if val:
-                                    app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
-                                    api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
-                                    index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val)
-                                    
-                                    if app_id_match and api_key_match and index_match:
-                                        if upsert_vault_row(d_domain, app_id_match.group(1),
-                                                            api_key_match.group(1), index_match.group(1)):
+                                    creds = parse_algolia_credentials(val, fallback_domain=d_domain)
+                                    if creds:
+                                        dom = creds['domain'] or d_domain
+                                        if upsert_vault_row(dom, creds['app_id'], creds['api_key'], creds['index']):
                                             st.rerun()
                                         else:
                                             st.error("Couldn't write to the Google Sheet.")
                                     else:
-                                        st.error("Invalid API URL.")
+                                        st.error("Couldn't find all 3 keys in that. Use the 🔑 bookmark on the dealer's site.")
                                 else:
-                                    st.warning("Paste a URL first!")
-                        with c4:
-                            if st.button("🚫 Ignore", key=f"ign_{d_domain}", help="Click this if the dealership does not use Dealer Inspire. The app will remember not to prompt you again.", use_container_width=True):
+                                    st.warning("Paste the keys first!")
+
+                        cc, cd = st.columns(2)
+                        with cc:
+                            if st.button("⚡ Auto-Detect", key=f"auto_{d_domain}", use_container_width=True,
+                                         help="Let the app try to find the keys itself (a strict firewall may block this)."):
+                                with st.spinner(f"Searching {d_domain}..."):
+                                    creds = autodetect_algolia(d_domain)
+                                if creds:
+                                    if upsert_vault_row(d_domain, creds['app_id'], creds['api_key'], creds['index']):
+                                        st.rerun()
+                                    else:
+                                        st.error("Found keys but couldn't write to the sheet.")
+                                else:
+                                    st.warning("Auto-detect blocked. Use the 🔑 bookmark below instead.")
+                        with cd:
+                            if st.button("🚫 Ignore", key=f"ign_{d_domain}",
+                                         help="This dealer doesn't use Dealer Inspire / Algolia. Stop prompting for it.",
+                                         use_container_width=True):
                                 if upsert_vault_row(d_domain, 'IGNORE', 'IGNORE', 'IGNORE'):
                                     st.rerun()
                                 else:
                                     st.error("Couldn't write the IGNORE flag to the Google Sheet.")
+                        st.markdown("")
 
                     st.markdown("---")
-                    st.markdown("**How to find the API URL:**")
-                    st.markdown("1. Click the dealer link above to open their site in a new tab.\n2. Right-click anywhere on their page and click **Inspect**.\n3. Click the **Network** tab, select the **Fetch/XHR** filter, and refresh the page.\n4. Search for `inventory`. Click the result starting with **`query?`** (it will contain 'algolia' in the URL). Right-click it and select **Copy URL**.")
-                    
-                    pdf_path = "Dealer Inspire URL Steps.pdf"
-                    if os.path.exists(pdf_path):
-                        with open(pdf_path, "rb") as pdf_file:
-                            pdf_bytes = pdf_file.read()
-                        st.download_button(
-                            label="📄 Download Visual Guide (PDF)",
-                            data=pdf_bytes,
-                            file_name="Dealer_Inspire_URL_Steps.pdf",
-                            mime="application/pdf"
-                        )
+                    st.markdown("**🔑 Easiest way — the one-click key grabber:**")
+                    safe_href_ac = html.escape(BOOKMARKLET_JS, quote=True)
+                    components.html(
+                        f"""
+                        <div style="font-family:sans-serif;padding:2px 0;">
+                          <a href="{safe_href_ac}"
+                             style="display:inline-block;background:#D70015;color:#fff;text-decoration:none;
+                                    font-weight:bold;padding:8px 14px;border-radius:6px;border:1px solid #A30010;
+                                    cursor:grab;font-size:14px;">🔑 Get Dealer Keys</a>
+                          <span style="font-size:12px;color:#777;margin-left:8px;">☝️ one-time: drag me to your bookmarks bar</span>
+                        </div>
+                        """,
+                        height=56,
+                    )
+                    st.markdown(
+                        "1. **Once:** drag the button above to your bookmarks bar.\n"
+                        "2. Click a dealer link above to open their site.\n"
+                        "3. Click your **Get Dealer Keys** bookmark. If it says the Search Key is missing, "
+                        "type any letter in the dealer's inventory search box, then click the bookmark **again**.\n"
+                        "4. Paste the copied line into that dealer's box above and hit **Save**."
+                    )
+
+                    with st.popover("Advanced: find it manually (DevTools)"):
+                        st.markdown("1. Open the dealer's site.\n2. Right-click → **Inspect**.\n3. **Network** tab → **Fetch/XHR** filter → refresh.\n4. Search `inventory`, click the **`query?`** result (contains 'algolia'), right-click → **Copy URL**, and paste it above.")
+                        pdf_path = "Dealer Inspire URL Steps.pdf"
+                        if os.path.exists(pdf_path):
+                            with open(pdf_path, "rb") as pdf_file:
+                                pdf_bytes = pdf_file.read()
+                            st.download_button(
+                                label="📄 Download Visual Guide (PDF)",
+                                data=pdf_bytes,
+                                file_name="Dealer_Inspire_URL_Steps.pdf",
+                                mime="application/pdf"
+                            )
             else:
                 st.success("✅ All inventory syncs resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
 
