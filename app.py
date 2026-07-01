@@ -249,12 +249,12 @@ def autodetect_algolia(domain):
             continue
     return parse_algolia_credentials(blob, fallback_domain=domain)
 
-def test_algolia_creds(app_id, api_key, index):
+def test_algolia_creds(app_id, api_key, index, domain=""):
     """
     Fire ONE Algolia request against the given creds to diagnose them.
-    Returns (ok: bool, headline: str, detail: str) in plain English so a
-    salesperson can see whether the keys actually work — instead of the app
-    silently falling back to the scraper.
+    Sends the same Referer/Origin as scan_url so a referer-locked key is tested
+    the way it will actually be used. Returns (ok, headline, detail) in plain
+    English so a salesperson can see whether the keys work.
     """
     if not (app_id and api_key and index):
         return False, "Missing keys", "One of App ID / API Key / Index is blank."
@@ -263,7 +263,13 @@ def test_algolia_creds(app_id, api_key, index):
         "x-algolia-application-id": app_id,
         "x-algolia-api-key": api_key,
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
+    if domain:
+        d = normalize_domain(domain)
+        headers["Referer"] = f"https://www.{d}/"
+        headers["Origin"] = f"https://www.{d}"
     try:
         r = requests.post(endpoint, headers=headers,
                           json={"params": "query=&hitsPerPage=1"}, timeout=8)
@@ -281,7 +287,7 @@ def test_algolia_creds(app_id, api_key, index):
         return True, f"✅ Keys work — {n} vehicles in this index", "This dealer is ready to scan via the API."
     if r.status_code in (401, 403):
         return False, "❌ Algolia rejected the key (403)", \
-               "The App ID or API Key is wrong, revoked, or a restricted 'secured' key. Re-grab it with the bookmark on a live search."
+               "The key is domain-locked and even the matching Referer didn't satisfy it (likely IP-restricted or a true secured key). This dealer will have to run on the scraper."
     if r.status_code == 404:
         return False, "❌ Index not found (404)", \
                f"The App ID + Key may be fine, but the Index Name '{index}' doesn't exist. Re-check the index."
@@ -903,10 +909,17 @@ def scan_url(url, session, ignored_domains, ignore_lock):
     # --- 3. FIRE THE API (with clean fallback on failure) ----------------
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
     api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+    # Referer/Origin match what a browser on the dealer's site sends — this is
+    # what satisfies referer-restricted search keys (e.g. Cars Commerce sites that
+    # only authorize their own domain). Harmless for unrestricted keys.
     api_headers = {
         "x-algolia-application-id": app_id,
         "x-algolia-api-key": api_key,
         "Content-Type": "application/json",
+        "Referer": f"https://www.{domain}/",
+        "Origin": f"https://www.{domain}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
 
     try:
@@ -1164,7 +1177,7 @@ with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
                 creds = {'app_id': cfg.get('app_id'), 'api_key': cfg.get('api_key'), 'index': cfg.get('index')}
         if creds:
             with st.spinner("Testing keys against Algolia..."):
-                ok, headline, detail = test_algolia_creds(creds['app_id'], creds['api_key'], creds['index'])
+                ok, headline, detail = test_algolia_creds(creds['app_id'], creds['api_key'], creds['index'], domain=dom)
             (st.success if ok else st.error)(f"{headline}  \n_{detail}_  \n(tested from {source})")
 
 # Main Execution Logic
