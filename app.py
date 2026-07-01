@@ -17,6 +17,16 @@ import random
 import threading
 from streamlit_gsheets import GSheetsConnection
 
+# --- FETCH ENGINE: curl_cffi impersonates a real Chrome TLS/JA3 fingerprint,
+# which defeats the flat 403s that plain `requests` triggers on WAF-protected
+# dealer sites. If it isn't installed we fall back to `requests` so the app
+# never crashes for the whole company.
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except Exception:
+    HAS_CFFI = False
+
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
@@ -781,7 +791,14 @@ def check_universal_status(url, session):
             'Sec-Fetch-User': '?1'
         }
         
-        response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        if HAS_CFFI:
+            # Real Chrome TLS fingerprint — the disguise plain requests can't wear.
+            # impersonate handles headers + JA3/JA4, so no manual header dict needed.
+            response = cffi_requests.get(
+                url, impersonate="chrome", timeout=10, allow_redirects=True
+            )
+        else:
+            response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
         
         if response.status_code in [403, 406, 429]:
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
