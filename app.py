@@ -630,41 +630,42 @@ def scan_url(url, session):
         index_name = vault_config['index']
             
     if app_id:
-        # Dynamically bypass strict website-only security blocks
         parsed_url = urlparse(str(url))
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+        base_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
         
-        # Upgraded to modern "multi-queries" endpoint to bypass 403 key restrictions
-        api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
+        # 1. Embed Keys AND the Algolia Agent signature directly into the URL
+        api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries?x-algolia-agent=Algolia%20for%20JavaScript%20(4.14.2)%3B%20Browser&x-algolia-application-id={app_id}&x-algolia-api-key={api_key}"
+        
+        # 2. Perfect Browser Mimic Headers (Crucial: application/x-www-form-urlencoded)
         api_headers = {
-            "x-algolia-application-id": app_id,
-            "x-algolia-api-key": api_key,
-            "Content-Type": "application/json",
-            "Referer": base_url,
-            "Origin": base_url.rstrip('/'),
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": base_origin + "/",
+            "Origin": base_origin,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         vin = extract_vin(url)
         if vin != "N/A":
             try:
-                # Modern Algolia JSON Payload Structure
-                payload = {
+                import json
+                # 3. Package the JSON as a raw string to maintain the disguise
+                payload = json.dumps({
                     "requests": [
                         {
                             "indexName": index_name,
                             "params": f"query={vin}"
                         }
                     ]
-                }
-                resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
+                })
+                # Use data=payload instead of json=payload
+                resp = session.post(api_endpoint, headers=api_headers, data=payload, timeout=8)
+                
                 if resp.status_code == 200:
                     results = resp.json().get("results", [])
                     hits = results[0].get("nbHits", 0) if results else 0
                     return "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
                 else:
                     return f"ERROR (Database Code: {resp.status_code})"
-            except Exception as e:
-                return "ERROR (Database Request Failed)"
             except Exception as e:
                 return "ERROR (Database Request Failed)"
         else:
