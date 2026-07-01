@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -13,6 +14,7 @@ import pytz
 from fpdf import FPDF
 import io
 import os
+import html
 import random
 import threading
 from streamlit_gsheets import GSheetsConnection
@@ -153,6 +155,122 @@ def upsert_vault_row(domain, app_id, api_key, index_name):
         return True
     except Exception:
         return False
+
+# --- VAULT ONBOARDING HELPERS (salesperson-friendly) ---
+def normalize_domain(raw):
+    """Strip protocol / www / paths down to a bare base domain."""
+    d = str(raw).strip().lower()
+    d = re.sub(r'^https?://', '', d)
+    d = d.replace('www.', '')
+    d = d.split('/')[0].split('?')[0].strip().strip('/')
+    return d
+
+def parse_algolia_credentials(text, fallback_domain=""):
+    """
+    Forgiving extractor. Accepts ANY of:
+      • Bookmarklet output:   domain|APPID|APIKEY|indexname
+      • A raw Algolia URL:    ...x-algolia-application-id=APPID&x-algolia-api-key=APIKEY.../indexes/NAME/query
+      • Messy pasted config:  loose text containing the three values
+    Returns dict(domain, app_id, api_key, index) or None if it can't find all three.
+    """
+    if not text:
+        return None
+    text = str(text).strip()
+    domain, app_id, api_key, index = fallback_domain, "", "", ""
+
+    # 1) Pipe format from the bookmarklet: domain|appId|apiKey|index
+    if text.count('|') >= 3:
+        parts = [p.strip() for p in text.split('|')]
+        domain = parts[0] or domain
+        app_id, api_key, index = parts[1], parts[2], parts[3]
+
+    # 2) URL query-param format (the old DevTools method)
+    if not app_id:
+        m = re.search(r'x-algolia-application-id=([A-Za-z0-9]+)', text)
+        if m: app_id = m.group(1)
+    if not api_key:
+        m = re.search(r'x-algolia-api-key=([a-f0-9]{32})', text, re.I)
+        if m: api_key = m.group(1)
+    if not index:
+        m = re.search(r'/indexes/([^/?"\']+)/(?:query|queries)', text)
+        if m: index = m.group(1)
+
+    # 3) Loose fallbacks — pull the values out of raw page text / config
+    if not app_id:
+        m = (re.search(r'([A-Z0-9]{10})-dsn\.algolia\.net', text)
+             or re.search(r'(?:application-?id|appid|app_id)["\'\s:=]+([A-Z0-9]{10})', text, re.I))
+        if m: app_id = m.group(1).upper()
+    if not api_key:
+        m = re.search(r'(?:api-?key|apikey|api_key|searchapikey)["\'\s:=]+([a-f0-9]{32})', text, re.I)
+        if m: api_key = m.group(1)
+    if not index:
+        m = (re.search(r'["\']?index(?:name)?["\']?\s*[:=]\s*["\']([a-z0-9_\-]*inventory[a-z0-9_\-]*)["\']', text, re.I)
+             or re.search(r'([a-z0-9][a-z0-9_\-]*_production_inventory[a-z0-9_]*)', text, re.I))
+        if m: index = m.group(1)
+
+    if app_id and api_key and index:
+        return {
+            'domain': normalize_domain(domain) if domain else "",
+            'app_id': app_id.strip(),
+            'api_key': api_key.strip(),
+            'index': index.strip(),
+        }
+    return None
+
+def autodetect_algolia(domain):
+    """
+    Server-side attempt: fetch the dealer's pages and scrape the Algolia creds
+    out of the page config. Uses curl_cffi (Chrome impersonation) so it has the
+    best shot past a WAF, but an aggressive firewall can still block this — in
+    which case the salesperson should use the Bookmarklet (runs in their browser).
+    Returns a creds dict or None.
+    """
+    domain = normalize_domain(domain)
+    if not domain:
+        return None
+    candidate_paths = ['', '/new-inventory/', '/used-inventory/', '/inventory/', '/searchnew.aspx']
+    blob = ""
+    for path in candidate_paths:
+        url = f"https://www.{domain}{path}"
+        try:
+            if HAS_CFFI:
+                r = cffi_requests.get(url, impersonate="chrome", timeout=12, allow_redirects=True)
+            else:
+                r = requests.get(url, timeout=8, allow_redirects=True,
+                                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                        'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                                        'Chrome/122.0.0.0 Safari/537.36'})
+            if r.status_code == 200 and r.text:
+                blob += "\n" + r.text
+                creds = parse_algolia_credentials(blob, fallback_domain=domain)
+                if creds:  # found everything — stop early
+                    return creds
+        except Exception:
+            continue
+    return parse_algolia_credentials(blob, fallback_domain=domain)
+
+# One-click bookmarklet: runs in the salesperson's OWN browser (no firewall can
+# block it), scrapes the Algolia creds from the live page, and copies a clean
+# "domain|appId|apiKey|index" line to the clipboard for pasting into the Vault.
+BOOKMARKLET_JS = (
+    "javascript:(function(){try{"
+    "var b=document.documentElement.innerHTML+'\\n'+"
+    "Array.prototype.map.call(document.scripts,function(s){return s.textContent||''}).join('\\n');"
+    "try{b+='\\n'+performance.getEntriesByType('resource').map(function(e){return e.name}).join('\\n')}catch(e){}"
+    "function m(r){var x=b.match(r);return x?x[1]:''}"
+    "var a=m(/([A-Z0-9]{10})-dsn\\.algolia\\.net/)||m(/(?:application-?id|appid|app_id)[\"'\\s:=]+([A-Z0-9]{10})/i);"
+    "var k=m(/(?:api-?key|apikey|api_key|searchapikey)[\"'\\s:=]+([a-f0-9]{32})/i);"
+    "var i=m(/[\"']?index(?:name)?[\"']?\\s*[:=]\\s*[\"']([a-z0-9_\\-]*inventory[a-z0-9_\\-]*)[\"']/i)"
+    "||m(/([a-z0-9][a-z0-9_\\-]*_production_inventory[a-z0-9_]*)/i);"
+    "var d=location.hostname.replace(/^www\\./,'');"
+    "var o=[d,a,k,i].join('|');"
+    "if(!a||!k||!i){window.prompt('Could not find all 3 keys on this page. Partial result (copy if useful):',o);return}"
+    "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(o).then("
+    "function(){window.prompt('COPIED! Paste this into the Vault:',o)},"
+    "function(){window.prompt('Copy this line into the Vault:',o)})}"
+    "else{window.prompt('Copy this line into the Vault:',o)}"
+    "}catch(e){alert('Bookmarklet error: '+e.message)}})();"
+)
 
 # --- LOGIN ---
 def check_password():
@@ -878,32 +996,97 @@ if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
-# --- NEW: QUICK ADD TO VAULT ---
-with st.sidebar.expander("🔐 Quick Add to Vault", expanded=False):
-    st.markdown("<span style='font-size: 0.85em; color: #555;'>Manually sync a Dealer Inspire site without running a report.</span>", unsafe_allow_html=True)
-    qd_domain = st.text_input("Dealer Domain", placeholder="e.g., pittstoyota.com", key="qd_domain")
-    qd_url = st.text_area("Algolia API URL", placeholder="Paste full URL here...", key="qd_url", height=100)
-    
-    if st.button("💾 Save to Vault", use_container_width=True):
-        if qd_domain and qd_url:
-            d_domain = qd_domain.replace('www.', '').replace('https://', '').replace('http://', '').strip().strip('/')
-            val = qd_url
-            app_id_match = re.search(r'x-algolia-application-id=([^&]+)', val)
-            api_key_match = re.search(r'x-algolia-api-key=([^&]+)', val)
-            # This regex captures both /query and /queries safely
-            index_match = re.search(r'/indexes/([^/]+)/(?:query|queries)', val) 
-            
-            if app_id_match and api_key_match and index_match:
-                if upsert_vault_row(d_domain, app_id_match.group(1),
-                                    api_key_match.group(1), index_match.group(1)):
-                    st.success(f"✅ {d_domain} synced to the vault!")
+# --- ADD A DEALER TO THE VAULT (salesperson-friendly) ---
+with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
+    st.caption("Only needed if a dealer's inventory won't scan on its own. Pick the easiest option that works.")
+    tab_auto, tab_book, tab_manual = st.tabs(["⚡ Auto-Detect", "🔖 Bookmarklet", "✍️ Manual"])
+
+    # ---- Option A: Auto-Detect (easiest; may be blocked by strict firewalls) ----
+    with tab_auto:
+        st.markdown("<span style='font-size:0.85em;color:#555;'>Type the dealer's website and we'll try to find the keys automatically.</span>", unsafe_allow_html=True)
+        ad_domain = st.text_input("Dealer website", placeholder="e.g., pittstoyota.com", key="ad_domain")
+        if st.button("⚡ Auto-Detect & Save", use_container_width=True, key="ad_btn"):
+            dom = normalize_domain(ad_domain)
+            if not dom:
+                st.warning("Enter the dealer's website first.")
+            else:
+                with st.spinner(f"Searching {dom} for inventory keys..."):
+                    creds = autodetect_algolia(dom)
+                if creds:
+                    if upsert_vault_row(dom, creds['app_id'], creds['api_key'], creds['index']):
+                        st.success(f"✅ {dom} synced automatically!")
+                        st.rerun()
+                    else:
+                        st.error("Found the keys, but couldn't write to the Google Sheet.")
+                else:
+                    st.warning("Couldn't auto-detect (this dealer's firewall likely blocked us). "
+                               "Use the **🔖 Bookmarklet** tab — it runs in your own browser and works even when this doesn't.")
+
+    # ---- Option B: Bookmarklet (most reliable; runs in the salesperson's browser) ----
+    with tab_book:
+        st.markdown(
+            "<span style='font-size:0.85em;color:#555;'>"
+            "<b>One-time setup:</b> drag the button below up to your browser's bookmarks bar."
+            "</span>", unsafe_allow_html=True)
+
+        safe_href = html.escape(BOOKMARKLET_JS, quote=True)
+        components.html(
+            f"""
+            <div style="font-family:sans-serif;padding:4px 0;">
+              <a href="{safe_href}"
+                 style="display:inline-block;background:#D70015;color:#fff;text-decoration:none;
+                        font-weight:bold;padding:8px 14px;border-radius:6px;border:1px solid #A30010;
+                        cursor:grab;font-size:14px;">
+                 🔑 Get Dealer Keys
+              </a>
+              <div style="font-size:12px;color:#777;margin-top:6px;">☝️ Drag me to your bookmarks bar</div>
+            </div>
+            """,
+            height=70,
+        )
+
+        st.markdown(
+            "<span style='font-size:0.85em;color:#555;'>"
+            "<b>Every time:</b> open the dealer's website → click your <b>Get Dealer Keys</b> bookmark → "
+            "it copies a line → paste it below and Save."
+            "</span>", unsafe_allow_html=True)
+
+        with st.popover("Can't drag it? Copy the code instead"):
+            st.caption("Create a new bookmark, name it 'Get Dealer Keys', and paste this as the URL/address:")
+            st.code(BOOKMARKLET_JS, language=None)
+
+        book_paste = st.text_area("Paste the copied line here", placeholder="fivestarfordga.com|APPID|APIKEY|indexname",
+                                  key="book_paste", height=80)
+        if st.button("💾 Save to Vault", use_container_width=True, key="book_btn"):
+            creds = parse_algolia_credentials(book_paste)
+            if creds and creds['domain']:
+                if upsert_vault_row(creds['domain'], creds['app_id'], creds['api_key'], creds['index']):
+                    st.success(f"✅ {creds['domain']} synced to the vault!")
                     st.rerun()
                 else:
-                    st.error("Couldn't write to the Google Sheet. Check the connection and try again.")
+                    st.error("Couldn't write to the Google Sheet.")
             else:
-                st.error("Invalid API URL. Check the format.")
-        else:
-            st.warning("Please fill both fields.")
+                st.error("That didn't look right. Click the bookmark on the dealer's site, then paste what it copies.")
+
+    # ---- Option C: Manual (power users / DevTools method) ----
+    with tab_manual:
+        st.markdown("<span style='font-size:0.85em;color:#555;'>Paste a full Algolia API URL (or any text containing the keys).</span>", unsafe_allow_html=True)
+        qd_domain = st.text_input("Dealer website", placeholder="e.g., pittstoyota.com", key="qd_domain")
+        qd_url = st.text_area("Algolia API URL / config", placeholder="Paste here...", key="qd_url", height=100)
+        if st.button("💾 Save to Vault", use_container_width=True, key="manual_btn"):
+            if qd_domain and qd_url:
+                creds = parse_algolia_credentials(qd_url, fallback_domain=qd_domain)
+                if creds:
+                    dom = creds['domain'] or normalize_domain(qd_domain)
+                    if upsert_vault_row(dom, creds['app_id'], creds['api_key'], creds['index']):
+                        st.success(f"✅ {dom} synced to the vault!")
+                        st.rerun()
+                    else:
+                        st.error("Couldn't write to the Google Sheet. Check the connection and try again.")
+                else:
+                    st.error("Couldn't find all three keys (App ID, API Key, Index) in what you pasted.")
+            else:
+                st.warning("Please fill both fields.")
 
 # Main Execution Logic
 if run_analysis_clicked:
