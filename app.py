@@ -249,6 +249,44 @@ def autodetect_algolia(domain):
             continue
     return parse_algolia_credentials(blob, fallback_domain=domain)
 
+def test_algolia_creds(app_id, api_key, index):
+    """
+    Fire ONE Algolia request against the given creds to diagnose them.
+    Returns (ok: bool, headline: str, detail: str) in plain English so a
+    salesperson can see whether the keys actually work — instead of the app
+    silently falling back to the scraper.
+    """
+    if not (app_id and api_key and index):
+        return False, "Missing keys", "One of App ID / API Key / Index is blank."
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index}/query"
+    headers = {
+        "x-algolia-application-id": app_id,
+        "x-algolia-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.post(endpoint, headers=headers,
+                          json={"params": "query=&hitsPerPage=1"}, timeout=8)
+    except Exception as e:
+        return False, "Couldn't reach Algolia", str(e)[:200]
+
+    if r.status_code == 200:
+        try:
+            n = r.json().get("nbHits", 0)
+        except Exception:
+            n = "?"
+        if isinstance(n, int) and n == 0:
+            return True, "Keys work, but this index looks empty (0 cars)", \
+                   "The App ID + Key are valid, but the Index Name may be wrong or the inventory feed is empty."
+        return True, f"✅ Keys work — {n} vehicles in this index", "This dealer is ready to scan via the API."
+    if r.status_code in (401, 403):
+        return False, "❌ Algolia rejected the key (403)", \
+               "The App ID or API Key is wrong, revoked, or a restricted 'secured' key. Re-grab it with the bookmark on a live search."
+    if r.status_code == 404:
+        return False, "❌ Index not found (404)", \
+               f"The App ID + Key may be fine, but the Index Name '{index}' doesn't exist. Re-check the index."
+    return False, f"❌ Algolia returned {r.status_code}", str(r.text)[:200]
+
 # One-click bookmarklet: runs in the salesperson's OWN browser (no firewall can
 # block it). It scrapes App ID + Index from the page AND hooks the network layer
 # to capture the Search Key from a live Algolia request (many dealers only send
@@ -1098,6 +1136,36 @@ with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
                     st.error("Couldn't find all three keys (App ID, API Key, Index) in what you pasted.")
             else:
                 st.warning("Please fill both fields.")
+
+    # ---- Diagnostic: is a dealer's key actually working? ----
+    st.divider()
+    st.markdown("<span style='font-size:0.85em;color:#555;'><b>🔬 Test a dealer's keys</b> — check if the API actually works (or why it doesn't).</span>", unsafe_allow_html=True)
+    test_domain = st.text_input("Domain to test", placeholder="e.g., fivestarfordga.com", key="test_domain")
+    test_paste = st.text_area("(optional) paste a bookmarklet line to test before saving", key="test_paste", height=68,
+                              placeholder="Leave blank to test what's already saved in the vault")
+    if st.button("🔬 Run Key Test", use_container_width=True, key="test_btn"):
+        dom = normalize_domain(test_domain)
+        creds = parse_algolia_credentials(test_paste, fallback_domain=dom) if test_paste.strip() else None
+        source = "pasted line"
+        if not creds:
+            cfg = DEALER_API_VAULT.get(dom)
+            source = "the vault"
+            if not dom:
+                st.warning("Enter a domain (or paste a line) to test.")
+                cfg = None
+            elif cfg is None:
+                st.error(f"❌ '{dom}' is NOT in the vault — nothing was saved. Add it via Auto-Detect or the Bookmarklet.")
+                cfg = None
+            elif isinstance(cfg, dict) and cfg.get('ignore'):
+                st.error(f"🚫 '{dom}' is set to IGNORE in the sheet, so the app skips the API entirely. "
+                         f"Re-save real keys for it to overwrite the IGNORE flag.")
+                cfg = None
+            if cfg:
+                creds = {'app_id': cfg.get('app_id'), 'api_key': cfg.get('api_key'), 'index': cfg.get('index')}
+        if creds:
+            with st.spinner("Testing keys against Algolia..."):
+                ok, headline, detail = test_algolia_creds(creds['app_id'], creds['api_key'], creds['index'])
+            (st.success if ok else st.error)(f"{headline}  \n_{detail}_  \n(tested from {source})")
 
 # Main Execution Logic
 if run_analysis_clicked:
