@@ -630,11 +630,17 @@ def scan_url(url, session):
         index_name = vault_config['index']
             
     if app_id:
+        # Dynamically bypass strict website-only security blocks
+        parsed_url = urlparse(str(url))
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+        
         api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
         api_headers = {
             "x-algolia-application-id": app_id,
             "x-algolia-api-key": api_key,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Referer": base_url,
+            "Origin": base_url.rstrip('/')
         }
         vin = extract_vin(url)
         if vin != "N/A":
@@ -769,7 +775,7 @@ with st.sidebar.expander("🔐 Quick Add to Vault", expanded=False):
     <div style='background-color: #f8f9fa; border-left: 4px solid #1E88E5; padding: 10px; font-size: 12px; margin-bottom: 5px; border-radius: 3px;'>
     <b>HOW TO FIND THE CODE:</b><br>
     <b>Plan A:</b> Inventory page ➔ Inspect ➔ Network. Check 'Disable cache', filter by <code>algolia</code>, refresh. Copy URL ending in <code>query?</code>.<br>
-    <b>Plan B:</b> Right-click site ➔ <i>View Page Source</i>. Press <b>Ctrl+F</b> and search <code>appId</code>. Highlight that entire sentence and copy it.
+    <b>Plan B:</b> Right-click site ➔ <i>View Page Source</i>. Press <b>Ctrl+F</b> and search <code>algoliaConfig</code> or <code>mvnAlgSettings</code>. Highlight that entire sentence and copy it.
     </div>
     """, unsafe_allow_html=True)
     
@@ -818,7 +824,6 @@ with st.sidebar.expander("🔐 Quick Add to Vault", expanded=False):
                         st.cache_data.clear()
                 except Exception: pass
                 
-                # INSTANT VALIDATION TRIGGER
                 st.success(f"✅ {d_domain} instantly synced!")
                 st.rerun()
             else:
