@@ -624,10 +624,13 @@ def scan_url(url, session):
     
     app_id, api_key, index_name = None, None, None
     
-    if vault_config and isinstance(vault_config, dict) and vault_config.get('app_id') != 'IGNORE':
-        app_id = vault_config['app_id']
-        api_key = vault_config['api_key']
-        index_name = vault_config['index']
+    if vault_config and isinstance(vault_config, dict):
+        # Convert all values to a single string to check for the word 'IGNORE'
+        config_values = [str(v).upper() for v in vault_config.values()]
+        if 'IGNORE' not in config_values:
+            app_id = vault_config.get('app_id')
+            api_key = vault_config.get('api_key')
+            index_name = vault_config.get('index')
             
     if app_id and app_id.upper() != 'IGNORE':
         parsed_url = urlparse(str(url))
