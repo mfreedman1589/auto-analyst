@@ -634,24 +634,37 @@ def scan_url(url, session):
         parsed_url = urlparse(str(url))
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
         
-        api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+        # Upgraded to modern "multi-queries" endpoint to bypass 403 key restrictions
+        api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
         api_headers = {
             "x-algolia-application-id": app_id,
             "x-algolia-api-key": api_key,
             "Content-Type": "application/json",
             "Referer": base_url,
-            "Origin": base_url.rstrip('/')
+            "Origin": base_url.rstrip('/'),
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         vin = extract_vin(url)
         if vin != "N/A":
             try:
-                payload = {"params": f"query={vin}"}
+                # Modern Algolia JSON Payload Structure
+                payload = {
+                    "requests": [
+                        {
+                            "indexName": index_name,
+                            "params": f"query={vin}"
+                        }
+                    ]
+                }
                 resp = session.post(api_endpoint, headers=api_headers, json=payload, timeout=5)
                 if resp.status_code == 200:
-                    hits = resp.json().get("nbHits", 0)
+                    results = resp.json().get("results", [])
+                    hits = results[0].get("nbHits", 0) if results else 0
                     return "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
                 else:
                     return f"ERROR (Database Code: {resp.status_code})"
+            except Exception as e:
+                return "ERROR (Database Request Failed)"
             except Exception as e:
                 return "ERROR (Database Request Failed)"
         else:
