@@ -18,16 +18,6 @@ import random
 import threading
 from streamlit_gsheets import GSheetsConnection
 
-# --- FETCH ENGINE: curl_cffi impersonates a real Chrome TLS/JA3 fingerprint,
-# which defeats the flat 403s that plain `requests` triggers on WAF-protected
-# dealer sites. If it isn't installed we fall back to `requests` so the app
-# never crashes for the whole company.
-try:
-    from curl_cffi import requests as cffi_requests
-    HAS_CFFI = True
-except Exception:
-    HAS_CFFI = False
-
 # --- CONFIGURATION & CUSTOM CSS ---
 st.set_page_config(page_title="Auto-Sales Intelligence Agent", layout="wide")
 
@@ -219,9 +209,8 @@ def parse_algolia_credentials(text, fallback_domain=""):
 def autodetect_algolia(domain):
     """
     Server-side attempt: fetch the dealer's pages and scrape the Algolia creds
-    out of the page config. Uses curl_cffi (Chrome impersonation) so it has the
-    best shot past a WAF, but an aggressive firewall can still block this — in
-    which case the salesperson should use the Bookmarklet (runs in their browser).
+    out of the page config. An aggressive firewall can block this — in which case
+    the salesperson should use the Bookmarklet (runs in their browser).
     Returns a creds dict or None.
     """
     domain = normalize_domain(domain)
@@ -232,13 +221,10 @@ def autodetect_algolia(domain):
     for path in candidate_paths:
         url = f"https://www.{domain}{path}"
         try:
-            if HAS_CFFI:
-                r = cffi_requests.get(url, impersonate="chrome", timeout=12, allow_redirects=True)
-            else:
-                r = requests.get(url, timeout=8, allow_redirects=True,
-                                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                                                        'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                                        'Chrome/122.0.0.0 Safari/537.36'})
+            r = requests.get(url, timeout=8, allow_redirects=True,
+                             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                                    'Chrome/122.0.0.0 Safari/537.36'})
             if r.status_code == 200 and r.text:
                 blob += "\n" + r.text
                 creds = parse_algolia_credentials(blob, fallback_domain=domain)
@@ -873,7 +859,112 @@ def categorize(u):
         
     return 'Other'
 
-def scan_url(url, session, ignored_domains, ignore_lock):
+import json as _json
+
+# ======================================================================
+# DEALER INSPIRE FULL-INVENTORY PULL
+# Instead of one Algolia query per VIN (thousands of calls -> rate limited, which
+# is what killed the Basil group report), pull the store's ENTIRE inventory in a
+# handful of paginated queries, then answer availability by set membership.
+# This runs against algolia.net (not the dealer's firewall), so it can't be
+# WAF-blocked, and it collapses ~10,000 queries into ~5-10.
+# ======================================================================
+
+def _vin_from_hit(hit):
+    """Pull the 17-char VIN out of an Algolia hit, schema-agnostically."""
+    try:
+        for k, v in hit.items():
+            if 'vin' in k.lower() and isinstance(v, str):
+                m = re.search(r'[A-HJ-NPR-Z0-9]{17}', v.upper())
+                if m:
+                    return m.group(0)
+        m = re.search(r'[A-HJ-NPR-Z0-9]{17}', _json.dumps(hit).upper())
+        return m.group(0) if m else None
+    except Exception:
+        return None
+
+def build_algolia_inventory(domain, cfg, session):
+    """
+    Pull a Dealer Inspire store's full current inventory.
+    Returns (vin_set, complete):
+      • vin_set  = every VIN currently listed (as far as we could retrieve)
+      • complete = True if we got the WHOLE store (so a report VIN that's absent
+                   is definitively sold). Algolia caps standard pagination at
+                   1000 hits; a store larger than that is 'incomplete' and the
+                   uncovered VINs fall back to the per-VIN query.
+    Returns (None, False) if the pull fails (caller then uses per-VIN behavior).
+    """
+    app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+    headers = {
+        "x-algolia-application-id": app_id,
+        "x-algolia-api-key": api_key,
+        "Content-Type": "application/json",
+        "Referer": f"https://www.{domain}/",
+        "Origin": f"https://www.{domain}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    }
+    vins = set()
+    nb_hits = None
+    per_page = 1000
+    page = 0
+    try:
+        while page * per_page < 1000:      # Algolia's default pagination ceiling
+            body = {"params": f"query=&hitsPerPage={per_page}&page={page}"}
+            r = session.post(endpoint, headers=headers, json=body, timeout=10)
+            if r.status_code != 200:
+                return (vins, False) if vins else (None, False)
+            data = r.json()
+            if nb_hits is None:
+                nb_hits = data.get('nbHits', 0)
+            hits = data.get('hits', [])
+            if not hits:
+                break
+            for h in hits:
+                v = _vin_from_hit(h)
+                if v:
+                    vins.add(v)
+            page += 1
+            if nb_hits is not None and page * per_page >= nb_hits:
+                break
+    except Exception:
+        return (vins, False) if vins else (None, False)
+
+    if not vins:
+        return (None, False)
+    complete = (nb_hits is not None) and (nb_hits <= 1000)
+    return (vins, complete)
+
+def build_all_inventories(vdp_urls, session):
+    """
+    Pre-pass: for each vaulted, non-ignored Dealer Inspire domain in the report,
+    pull its full inventory once (concurrently). Returns {domain: (vin_set, complete)}.
+    """
+    domains = set()
+    for u in vdp_urls:
+        d = urlparse(str(u)).netloc.replace('www.', '').lower()
+        cfg = DEALER_API_VAULT.get(d)
+        if isinstance(cfg, dict) and not cfg.get('ignore') \
+           and cfg.get('app_id') and cfg.get('api_key') and cfg.get('index'):
+            domains.add(d)
+    inventories = {}
+    if not domains:
+        return inventories
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(domains))) as ex:
+        futs = {ex.submit(build_algolia_inventory, d, DEALER_API_VAULT[d], session): d
+                for d in domains}
+        for fut in concurrent.futures.as_completed(futs):
+            d = futs[fut]
+            try:
+                res = fut.result()
+            except Exception:
+                res = (None, False)
+            if res and res[0]:
+                inventories[d] = res
+    return inventories
+
+def scan_url(url, session, ignored_domains, ignore_lock, inventories=None):
     """
     Decide a VDP's status. Order of operations:
       1. HARD IGNORE: if the sheet flags the domain, or we've already been blocked
@@ -908,7 +999,19 @@ def scan_url(url, session, ignored_domains, ignore_lock):
         # Can't query Algolia without a VIN — let the scraper read the page.
         return check_universal_status(url, session)
 
-    # --- 3. FIRE THE API (with clean fallback on failure) ----------------
+    # --- 3a. FULL-INVENTORY MEMBERSHIP (no per-car request) --------------
+    # If we pulled this store's whole inventory up front, answer from it.
+    inv = (inventories or {}).get(domain)
+    if inv and inv[0] is not None:
+        vin_set, complete = inv
+        if vin in vin_set:
+            return "Available"
+        if complete:
+            # We have the entire store and this VIN isn't in it -> sold.
+            return "SOLD (Not in Dealer Database)"
+        # Incomplete pull (store > 1000): fall through to the per-VIN query below.
+
+    # --- 3b. FIRE THE API (single VIN, with clean fallback on failure) ---
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
     api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
     # Referer/Origin match what a browser on the dealer's site sends — this is
@@ -953,31 +1056,27 @@ def check_universal_status(url, session):
     vin = extract_vin(url)
     if not year: return "N/A"
 
+    # WAF EVASION HEADERS
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
+    ]
+
     try:
-        if HAS_CFFI:
-            # Real Chrome TLS fingerprint — the disguise plain requests can't wear.
-            # impersonate handles headers + JA3/JA4, so no manual header dict needed.
-            response = cffi_requests.get(
-                url, impersonate="chrome", timeout=10, allow_redirects=True
-            )
-        else:
-            user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
-            ]
-            headers = {
-                'User-Agent': random.choice(user_agents),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1'
-            }
-            response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
+        headers = {
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        }
+
+        response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
 
         if response.status_code in [403, 406, 429]:
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
@@ -1216,9 +1315,22 @@ if run_analysis_clicked:
     ignored_domains = set()
     ignore_lock = threading.Lock()
 
+    # --- FULL-INVENTORY PRE-PASS (Dealer Inspire): pull each vaulted store's
+    # whole catalog once, so most cars resolve by membership with no per-car call.
+    with st.spinner("Pulling live dealer inventories..."):
+        inventories = build_all_inventories(vdp_urls, session)
+    if inventories:
+        pulled = sum(len(v[0]) for v in inventories.values())
+        complete_n = sum(1 for v in inventories.values() if v[1])
+        st.success(
+            f"📦 Pulled full inventory for {len(inventories)} dealer(s) "
+            f"({pulled:,} live vehicles, {complete_n} complete) — these resolve "
+            f"instantly without per-car API calls."
+        )
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {
-            executor.submit(scan_url, url, session, ignored_domains, ignore_lock): url
+            executor.submit(scan_url, url, session, ignored_domains, ignore_lock, inventories): url
             for url in vdp_urls
         }
         total_urls = len(vdp_urls)
@@ -1361,7 +1473,7 @@ if st.session_state.current_report_id is not None:
                                     st.warning("Auto-detect blocked. Use the 🔑 bookmark below instead.")
                         with cd:
                             if st.button("🚫 Ignore", key=f"ign_{d_domain}",
-                                         help="This dealer doesn't use Dealer Inspire / Algolia. Stop prompting for it.",
+                                         help="Mark as not scannable — the dealer doesn't use Dealer Inspire / Algolia, or can't be reached. Stops prompting for it.",
                                          use_container_width=True):
                                 if upsert_vault_row(d_domain, 'IGNORE', 'IGNORE', 'IGNORE'):
                                     st.rerun()
