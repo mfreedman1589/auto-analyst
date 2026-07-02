@@ -873,195 +873,9 @@ def categorize(u):
         
     return 'Other'
 
-import gzip
-from collections import defaultdict
-
-# ======================================================================
-# LIVE INVENTORY SITEMAP LAYER
-# Instead of one HTTP request per car, fetch a dealer's XML sitemap ONCE and
-# resolve availability from it. Cars in the sitemap are Available; if the
-# sitemap is trustworthy for a domain, cars missing from it are Sold. This
-# collapses 1,000+ per-car requests into a handful, and sidesteps the per-page
-# rate-limiting that blocks firewalled dealers.
-# ======================================================================
-
-# Tunable guards. A domain's sitemap is only trusted for SOLD inference when it
-# lists at least MIN_VEHICLES cars AND matches at least MIN_MATCH_RATE of the
-# report's URLs for that domain (protects against partial/empty/wrong sitemaps).
-SITEMAP_MIN_VEHICLES = 25
-SITEMAP_MIN_MATCH_RATE = 0.35
-SITEMAP_MAX_CHILD = 40          # max child sitemaps fetched per domain
-SITEMAP_MAX_URLS = 60000        # max VDP urls collected per domain
-SITEMAP_TIMEOUT = 12
-
-def _sm_norm_url(u):
-    """Normalize a URL for set-membership: drop scheme/www/query/trailing slash."""
-    u = str(u).strip().lower().split('?')[0].split('#')[0]
-    u = re.sub(r'^https?://', '', u).replace('www.', '')
-    return u.rstrip('/')
-
-def _sm_vin(u):
-    """17-char VIN (DealerInspire and most platforms put it in the slug)."""
-    m = re.search(r'(?:^|[-/])([a-hj-npr-z0-9]{17})(?:[-/.]|$)', str(u).lower())
-    return m.group(1) if m else None
-
-def _sm_dcom_id(u):
-    """Dealer.com vehicle id: 32-hex token before .htm (Heritage/Calavan style)."""
-    m = re.search(r'([a-f0-9]{32})\.htm', str(u).lower())
-    return m.group(1) if m else None
-
-def _sm_is_vdp(u):
-    """A sitemap entry is a vehicle page if it carries a VIN or a Dealer.com id."""
-    return bool(_sm_vin(u) or _sm_dcom_id(u))
-
-def _sm_fetch(url, session):
-    """Fetch a sitemap (Chrome-impersonated), transparently decompressing .gz."""
-    try:
-        if HAS_CFFI:
-            r = cffi_requests.get(url, impersonate="chrome",
-                                  timeout=SITEMAP_TIMEOUT, allow_redirects=True)
-        else:
-            r = session.get(url, timeout=SITEMAP_TIMEOUT, allow_redirects=True)
-        if r.status_code != 200:
-            return None
-        content = r.content
-        if url.lower().endswith('.gz') or content[:2] == b'\x1f\x8b':
-            try:
-                content = gzip.decompress(content)
-            except Exception:
-                pass
-        return content.decode('utf-8', errors='ignore')
-    except Exception:
-        return None
-
-def _sm_discover(domain, session):
-    """Find candidate sitemap URLs via robots.txt plus common fallbacks."""
-    found = []
-    robots = _sm_fetch(f"https://www.{domain}/robots.txt", session)
-    if robots:
-        for line in robots.splitlines():
-            if line.lower().strip().startswith('sitemap:'):
-                found.append(line.split(':', 1)[1].strip())
-    for path in ('/sitemap.xml', '/sitemap_index.xml', '/sitemapindex.xml',
-                 '/inventory_sitemap.xml'):
-        found.append(f"https://www.{domain}{path}")
-    seen, out = set(), []
-    for u in found:
-        if u and u not in seen:
-            seen.add(u); out.append(u)
-    return out
-
-def build_sitemap_index(domain, session):
-    """
-    Crawl a domain's sitemap(s) and return {'urls','vins','ids','count'} of the
-    active vehicle pages, or None if no usable inventory sitemap is found.
-    Sitemap indexes are followed (inventory-named children first), with caps.
-    """
-    urls, vins, ids = set(), set(), set()
-    to_visit = _sm_discover(domain, session)
-    visited = set()
-    fetched = 0
-    consecutive_fails = 0
-    i = 0
-    while i < len(to_visit) and fetched < SITEMAP_MAX_CHILD and len(urls) < SITEMAP_MAX_URLS:
-        sm_url = to_visit[i]; i += 1
-        if sm_url in visited:
-            continue
-        visited.add(sm_url)
-        xml = _sm_fetch(sm_url, session)
-        if not xml:
-            consecutive_fails += 1
-            # A firewalled/absent sitemap host will just keep failing — don't
-            # burn the IP hammering it; give up on this domain.
-            if consecutive_fails >= 5:
-                break
-            continue
-        consecutive_fails = 0
-        fetched += 1
-        locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', xml, re.I)
-        if '<sitemapindex' in xml.lower():
-            # It's an index of child sitemaps — queue them, inventory ones first.
-            locs.sort(key=lambda u: 0 if re.search(r'invent|vehicle|vdp|srp|car', u, re.I) else 1)
-            for c in locs:
-                if c not in visited:
-                    to_visit.append(c)
-        else:
-            for loc in locs:
-                if _sm_is_vdp(loc):
-                    urls.add(_sm_norm_url(loc))
-                    v = _sm_vin(loc);  d = _sm_dcom_id(loc)
-                    if v: vins.add(v)
-                    if d: ids.add(d)
-                    if len(urls) >= SITEMAP_MAX_URLS:
-                        break
-    if not urls:
-        return None
-    return {'urls': urls, 'vins': vins, 'ids': ids, 'count': len(urls)}
-
-def sitemap_match(url, idx):
-    """Is this report URL present in the sitemap index (by URL, VIN, or id)?"""
-    if _sm_norm_url(url) in idx['urls']:
-        return True
-    v = _sm_vin(url)
-    if v and v in idx['vins']:
-        return True
-    d = _sm_dcom_id(url)
-    if d and d in idx['ids']:
-        return True
-    return False
-
-def build_all_sitemaps(vdp_urls, session):
-    """
-    Pre-pass: for each domain in the report, build its sitemap index concurrently
-    and decide whether it's authoritative (trustworthy for SOLD inference).
-    Returns domain_sitemaps dict keyed by domain.
-    """
-    domain_urls = defaultdict(list)
-    for u in vdp_urls:
-        dom = urlparse(str(u)).netloc.replace('www.', '').lower()
-        if dom:
-            domain_urls[dom].append(u)
-
-    domain_sitemaps = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        futs = {ex.submit(build_sitemap_index, dom, session): dom for dom in domain_urls}
-        for fut in concurrent.futures.as_completed(futs):
-            dom = futs[fut]
-            try:
-                idx = fut.result()
-            except Exception:
-                idx = None
-            if not idx:
-                continue
-            report_urls = domain_urls[dom]
-            matches = sum(1 for u in report_urls if sitemap_match(u, idx))
-            rate = matches / len(report_urls) if report_urls else 0.0
-            authoritative = (idx['count'] >= SITEMAP_MIN_VEHICLES
-                             and rate >= SITEMAP_MIN_MATCH_RATE)
-            domain_sitemaps[dom] = {'index': idx, 'authoritative': authoritative,
-                                    'rate': rate, 'count': idx['count'],
-                                    'n_urls': len(report_urls)}
-    return domain_sitemaps
-
-def _resolve_miss(url, session, domain, domain_sitemaps):
-    """
-    A car that isn't in the sitemap (or on a domain with no sitemap). If the
-    domain's sitemap is authoritative, absence means Sold — no request needed.
-    Otherwise fall back to the visual scraper.
-    """
-    sm = (domain_sitemaps or {}).get(domain)
-    if sm and sm.get('index') and sm.get('authoritative'):
-        return "SOLD (Not in Live Inventory)"
-    return check_universal_status(url, session)
-
-def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
+def scan_url(url, session, ignored_domains, ignore_lock):
     """
     Decide a VDP's status. Order of operations:
-      0. LIVE INVENTORY SITEMAP: if the car is in the dealer's current sitemap,
-         it's Available (resolved instantly, no request). If the domain's sitemap
-         is authoritative and the car ISN'T in it, it's Sold — again with no
-         per-car request. This is what makes 1,000+ car reports fast and rescues
-         firewalled dealers whose sitemap is still readable.
       1. HARD IGNORE: if the sheet flags the domain, or we've already been blocked
          by it this run, go straight to the visual scraper. No API call is built.
       2. If there are no usable credentials, use the scraper.
@@ -1070,17 +884,7 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
          back to the scraper immediately. We never return a raw API ERROR for a
          blocked API — the scraper always gets a chance.
     """
-    domain_sitemaps = domain_sitemaps or {}
     domain = urlparse(str(url)).netloc.replace('www.', '').lower()
-
-    # --- 0. LIVE INVENTORY SITEMAP (cheapest + most scalable signal) ------
-    sm = domain_sitemaps.get(domain)
-    if sm and sm.get('index'):
-        if sitemap_match(url, sm['index']):
-            return "Available"                 # in live inventory -> available
-        # Not in the sitemap. Only call it sold here if the sitemap is trusted;
-        # otherwise fall through and let the API/scraper decide.
-        # (handled again in _resolve_miss so API-working domains stay authoritative)
 
     # --- 1. HARD KILL SWITCH ---------------------------------------------
     with ignore_lock:
@@ -1089,7 +893,7 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
     sheet_says_ignore = isinstance(cfg, dict) and cfg.get('ignore') is True
 
     if blocked_this_run or sheet_says_ignore:
-        return _resolve_miss(url, session, domain, domain_sitemaps)
+        return check_universal_status(url, session)
 
     # --- 2. NO USABLE CREDENTIALS ----------------------------------------
     has_creds = (
@@ -1097,12 +901,12 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
         and cfg.get('app_id') and cfg.get('api_key') and cfg.get('index')
     )
     if not has_creds:
-        return _resolve_miss(url, session, domain, domain_sitemaps)
+        return check_universal_status(url, session)
 
     vin = extract_vin(url)
     if vin == "N/A":
         # Can't query Algolia without a VIN — let the scraper read the page.
-        return _resolve_miss(url, session, domain, domain_sitemaps)
+        return check_universal_status(url, session)
 
     # --- 3. FIRE THE API (with clean fallback on failure) ----------------
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
@@ -1125,13 +929,13 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
                             json={"params": f"query={vin}"}, timeout=5)
     except Exception:
         # Network/DNS/timeout talking to the API -> scraper.
-        return _resolve_miss(url, session, domain, domain_sitemaps)
+        return check_universal_status(url, session)
 
     if resp.status_code == 200:
         try:
             hits = resp.json().get("nbHits", 0)
         except Exception:
-            return _resolve_miss(url, session, domain, domain_sitemaps)
+            return check_universal_status(url, session)
         return "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
 
     # Blocked / unauthorized / rate-limited: kill this domain's API for the run.
@@ -1140,20 +944,7 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
             ignored_domains.add(domain)
 
     # Any non-200 -> fall back to the scraper instead of returning an ERROR.
-    return _resolve_miss(url, session, domain, domain_sitemaps)
-
-# --- FIREWALL CIRCUIT BREAKER -------------------------------------------
-# Once a domain has hard-blocked us enough times in a run, stop firing requests
-# at it entirely. This protects the shared IP (the thing that lets every OTHER
-# dealer work) from being burned by thousands of doomed requests, and it makes
-# firewalled dealers fail fast instead of dragging the whole report. Reset each
-# run in the main block.
-FIREWALL_BREAKER = {
-    'blocks': defaultdict(int),   # domain -> consecutive firewall blocks
-    'tripped': set(),             # domains we've given up on this run
-    'lock': threading.Lock(),
-    'limit': 12,                  # give up after this many blocks from a domain
-}
+    return check_universal_status(url, session)
 
 # --- THE UNIVERSAL VISUAL SCRAPER ---------------------------------------
 def check_universal_status(url, session):
@@ -1161,13 +952,6 @@ def check_universal_status(url, session):
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
-
-    # Circuit breaker: if this domain has already proven to be a hard firewall,
-    # don't fire another doomed request — mark it and move on.
-    domain = urlparse(url).netloc.replace('www.', '').lower()
-    with FIREWALL_BREAKER['lock']:
-        if domain in FIREWALL_BREAKER['tripped']:
-            return "ERROR (Firewalled - Skipped)"
 
     try:
         if HAS_CFFI:
@@ -1196,10 +980,6 @@ def check_universal_status(url, session):
             response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
 
         if response.status_code in [403, 406, 429]:
-            with FIREWALL_BREAKER['lock']:
-                FIREWALL_BREAKER['blocks'][domain] += 1
-                if FIREWALL_BREAKER['blocks'][domain] >= FIREWALL_BREAKER['limit']:
-                    FIREWALL_BREAKER['tripped'].add(domain)
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
         if response.status_code in [404, 410]:
@@ -1436,27 +1216,9 @@ if run_analysis_clicked:
     ignored_domains = set()
     ignore_lock = threading.Lock()
 
-    # Fresh circuit-breaker state each run.
-    FIREWALL_BREAKER['blocks'] = defaultdict(int)
-    FIREWALL_BREAKER['tripped'] = set()
-
-    # --- SITEMAP PRE-PASS: resolve most cars from live inventory in bulk ---
-    with st.spinner("Reading live inventory sitemaps..."):
-        domain_sitemaps = build_all_sitemaps(vdp_urls, session)
-    if domain_sitemaps:
-        auth = [d for d, v in domain_sitemaps.items() if v['authoritative']]
-        total_active = sum(v['count'] for v in domain_sitemaps.values())
-        if auth:
-            st.success(
-                f"🗺️ Live inventory sitemaps found for {len(auth)} of "
-                f"{df_raw[df_raw['Category']=='VDP']['Dealer'].nunique()} dealer(s) "
-                f"({total_active:,} active vehicles) — those resolve instantly without "
-                f"per-car requests."
-            )
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {
-            executor.submit(scan_url, url, session, ignored_domains, ignore_lock, domain_sitemaps): url
+            executor.submit(scan_url, url, session, ignored_domains, ignore_lock): url
             for url in vdp_urls
         }
         total_urls = len(vdp_urls)
