@@ -263,13 +263,24 @@ def test_algolia_creds(app_id, api_key, index, domain=""):
 
     if r.status_code == 200:
         try:
-            n = r.json().get("nbHits", 0)
+            data = r.json()
+            n = data.get("nbHits", 0)
+            hits = data.get("hits", [])
         except Exception:
-            n = "?"
+            return True, "Keys work, but the response wasn't readable", "Got a 200 but couldn't parse the JSON."
         if isinstance(n, int) and n == 0:
             return True, "Keys work, but this index looks empty (0 cars)", \
                    "The App ID + Key are valid, but the Index Name may be wrong or the inventory feed is empty."
-        return True, f"✅ Keys work — {n} vehicles in this index", "This dealer is ready to scan via the API."
+        # Full-pull readiness: can we extract a VIN from a hit? This is what the
+        # inventory pull relies on. If it fails, the pull can't match cars.
+        sample_vin = _vin_from_hit(hits[0]) if hits else None
+        over_cap = " (over Algolia's 1,000 cap — the rest fall back to per-VIN)" if isinstance(n, int) and n > 1000 else ""
+        if sample_vin:
+            return True, f"✅ Keys work — {n} vehicles{over_cap}", \
+                   f"Full-pull READY: extracted VIN {sample_vin} from a sample record. This dealer resolves by inventory pull."
+        keys = ", ".join(list(hits[0].keys())[:12]) if hits else "none"
+        return False, f"⚠️ Keys work ({n} vehicles) but no VIN found in records", \
+               f"The pull can't match cars because records don't expose a VIN the way expected. Record fields: {keys}"
     if r.status_code in (401, 403):
         return False, "❌ Algolia rejected the key (403)", \
                "The key is domain-locked and even the matching Referer didn't satisfy it (likely IP-restricted or a true secured key). This dealer will have to run on the scraper."
