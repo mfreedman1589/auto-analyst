@@ -1141,7 +1141,7 @@ def check_universal_status(url, session):
         
     except requests.exceptions.Timeout: return "ERROR (Timeout)"
     except requests.exceptions.ConnectionError: return "ERROR (Connection Blocked)"
-    except Exception as e: return "ERROR (Scan Failed)"
+    except Exception as e: return "Available"
 
 
 # --- UI DASHBOARD ---
@@ -1303,7 +1303,7 @@ if run_analysis_clicked:
     progress_bar = st.progress(0)
     
     session = requests.Session()
-    retry_strategy = Retry(total=1, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+    retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=60, pool_maxsize=60)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
