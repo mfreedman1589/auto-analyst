@@ -961,6 +961,7 @@ def build_sitemap_index(domain, session):
     to_visit = _sm_discover(domain, session)
     visited = set()
     fetched = 0
+    consecutive_fails = 0
     i = 0
     while i < len(to_visit) and fetched < SITEMAP_MAX_CHILD and len(urls) < SITEMAP_MAX_URLS:
         sm_url = to_visit[i]; i += 1
@@ -969,7 +970,13 @@ def build_sitemap_index(domain, session):
         visited.add(sm_url)
         xml = _sm_fetch(sm_url, session)
         if not xml:
+            consecutive_fails += 1
+            # A firewalled/absent sitemap host will just keep failing — don't
+            # burn the IP hammering it; give up on this domain.
+            if consecutive_fails >= 5:
+                break
             continue
+        consecutive_fails = 0
         fetched += 1
         locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', xml, re.I)
         if '<sitemapindex' in xml.lower():
@@ -1135,13 +1142,33 @@ def scan_url(url, session, ignored_domains, ignore_lock, domain_sitemaps=None):
     # Any non-200 -> fall back to the scraper instead of returning an ERROR.
     return _resolve_miss(url, session, domain, domain_sitemaps)
 
+# --- FIREWALL CIRCUIT BREAKER -------------------------------------------
+# Once a domain has hard-blocked us enough times in a run, stop firing requests
+# at it entirely. This protects the shared IP (the thing that lets every OTHER
+# dealer work) from being burned by thousands of doomed requests, and it makes
+# firewalled dealers fail fast instead of dragging the whole report. Reset each
+# run in the main block.
+FIREWALL_BREAKER = {
+    'blocks': defaultdict(int),   # domain -> consecutive firewall blocks
+    'tripped': set(),             # domains we've given up on this run
+    'lock': threading.Lock(),
+    'limit': 12,                  # give up after this many blocks from a domain
+}
+
 # --- THE UNIVERSAL VISUAL SCRAPER ---------------------------------------
 def check_universal_status(url, session):
     url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
     vin = extract_vin(url)
     if not year: return "N/A"
-    
+
+    # Circuit breaker: if this domain has already proven to be a hard firewall,
+    # don't fire another doomed request — mark it and move on.
+    domain = urlparse(url).netloc.replace('www.', '').lower()
+    with FIREWALL_BREAKER['lock']:
+        if domain in FIREWALL_BREAKER['tripped']:
+            return "ERROR (Firewalled - Skipped)"
+
     try:
         if HAS_CFFI:
             # Real Chrome TLS fingerprint — the disguise plain requests can't wear.
@@ -1169,6 +1196,10 @@ def check_universal_status(url, session):
             response = session.get(url, headers=headers, timeout=5, allow_redirects=True)
 
         if response.status_code in [403, 406, 429]:
+            with FIREWALL_BREAKER['lock']:
+                FIREWALL_BREAKER['blocks'][domain] += 1
+                if FIREWALL_BREAKER['blocks'][domain] >= FIREWALL_BREAKER['limit']:
+                    FIREWALL_BREAKER['tripped'].add(domain)
             return f"ERROR (Website Firewall Blocked Scan: {response.status_code})"
             
         if response.status_code in [404, 410]:
@@ -1404,6 +1435,10 @@ if run_analysis_clicked:
     # domain lands here, every remaining VDP for it skips the API entirely.
     ignored_domains = set()
     ignore_lock = threading.Lock()
+
+    # Fresh circuit-breaker state each run.
+    FIREWALL_BREAKER['blocks'] = defaultdict(int)
+    FIREWALL_BREAKER['tripped'] = set()
 
     # --- SITEMAP PRE-PASS: resolve most cars from live inventory in bulk ---
     with st.spinner("Reading live inventory sitemaps..."):
