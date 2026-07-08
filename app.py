@@ -910,6 +910,56 @@ def resolve_algolia_vins(domain, cfg, vins, session):
         pass
     return out
 
+# ======================================================================
+# MARKETCHECK EXTERNAL FALLBACK
+# For dealers that are locked (API rejected + firewall-blocked) so neither our
+# own API nor the scraper can reach them, MarketCheck's daily-crawled inventory
+# answers "is this VIN still listed?". Only fires for cars the normal scan left
+# as errors, and only if a key is set in Streamlit secrets.
+# ======================================================================
+
+def get_marketcheck_key():
+    """Read the MarketCheck key from Streamlit secrets; '' if not configured."""
+    try:
+        return str(st.secrets.get("MARKETCHECK_KEY", "")).strip()
+    except Exception:
+        return ""
+
+def resolve_via_marketcheck(vins, api_key, session):
+    """
+    Look up a list of VINs in MarketCheck's active inventory (batched).
+    Returns {vin: "Available" | "SOLD (Not in Market Inventory)"} for whatever
+    resolved; VINs left out (on failure) keep their original scan result.
+    """
+    out = {}
+    if not api_key or not vins:
+        return out
+    endpoint = "https://api.marketcheck.com/v2/search/car/active"
+    vins = list(vins)
+    BATCH = 50
+    try:
+        for i in range(0, len(vins), BATCH):
+            chunk = vins[i:i + BATCH]
+            params = {
+                "api_key": api_key,
+                "vins": ",".join(chunk),
+                "rows": str(len(chunk)),
+            }
+            r = session.get(endpoint, params=params, timeout=25)
+            if r.status_code != 200:
+                break   # stop on auth/limit error; leave the rest as-is
+            data = r.json()
+            active = set()
+            for lst in data.get("listings", []):
+                v = str(lst.get("vin", "")).upper().strip()
+                if v:
+                    active.add(v)
+            for v in chunk:
+                out[v] = "Available" if v.upper().strip() in active else "SOLD (Not in Market Inventory)"
+    except Exception:
+        pass
+    return out
+
 def build_all_vin_status(vdp_urls, session):
     """
     Pre-pass: group the report's VINs by vaulted Dealer Inspire domain and resolve
@@ -1298,7 +1348,26 @@ if run_analysis_clicked:
                 vdp_results[url] = "ERROR (Scan Failed)"
             if (i + 1) % progress_step == 0 or (i + 1) == total_urls:
                 progress_bar.progress((i + 1) / total_urls)
-            
+
+    # --- EXTERNAL FALLBACK: resolve anything the normal scan couldn't ------
+    # Locked dealers (API rejected + firewall-blocked) leave "ERROR" results.
+    # If a MarketCheck key is configured, look those VINs up in MarketCheck's
+    # daily inventory. Skipped entirely if no key is set (no behavior change).
+    mc_key = get_marketcheck_key()
+    if mc_key:
+        mc_vins = {}   # vin -> [urls]
+        for url, res in vdp_results.items():
+            if str(res).startswith("ERROR") and "No VIN" not in str(res):
+                v = extract_vin(url)
+                if v != "N/A":
+                    mc_vins.setdefault(v, []).append(url)
+        if mc_vins:
+            with st.spinner("Checking remaining vehicles against live market inventory..."):
+                mc_status = resolve_via_marketcheck(list(mc_vins.keys()), mc_key, session)
+            for v, status in mc_status.items():
+                for url in mc_vins.get(v, []):
+                    vdp_results[url] = status
+
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
     
