@@ -265,22 +265,13 @@ def test_algolia_creds(app_id, api_key, index, domain=""):
         try:
             data = r.json()
             n = data.get("nbHits", 0)
-            hits = data.get("hits", [])
         except Exception:
             return True, "Keys work, but the response wasn't readable", "Got a 200 but couldn't parse the JSON."
         if isinstance(n, int) and n == 0:
             return True, "Keys work, but this index looks empty (0 cars)", \
                    "The App ID + Key are valid, but the Index Name may be wrong or the inventory feed is empty."
-        # Full-pull readiness: can we extract a VIN from a hit? This is what the
-        # inventory pull relies on. If it fails, the pull can't match cars.
-        sample_vin = _vin_from_hit(hits[0]) if hits else None
-        over_cap = " (over Algolia's 1,000 cap — the rest fall back to per-VIN)" if isinstance(n, int) and n > 1000 else ""
-        if sample_vin:
-            return True, f"✅ Keys work — {n} vehicles{over_cap}", \
-                   f"Full-pull READY: extracted VIN {sample_vin} from a sample record. This dealer resolves by inventory pull."
-        keys = ", ".join(list(hits[0].keys())[:12]) if hits else "none"
-        return False, f"⚠️ Keys work ({n} vehicles) but no VIN found in records", \
-               f"The pull can't match cars because records don't expose a VIN the way expected. Record fields: {keys}"
+        return True, f"✅ Keys work — {n} vehicles in this index", \
+               "This dealer is ready to resolve via the inventory API."
     if r.status_code in (401, 403):
         return False, "❌ Algolia rejected the key (403)", \
                "The key is domain-locked and even the matching Referer didn't satisfy it (likely IP-restricted or a true secured key). This dealer will have to run on the scraper."
@@ -870,43 +861,26 @@ def categorize(u):
         
     return 'Other'
 
-import json as _json
+from collections import defaultdict
 
 # ======================================================================
-# DEALER INSPIRE FULL-INVENTORY PULL
-# Instead of one Algolia query per VIN (thousands of calls -> rate limited, which
-# is what killed the Basil group report), pull the store's ENTIRE inventory in a
-# handful of paginated queries, then answer availability by set membership.
-# This runs against algolia.net (not the dealer's firewall), so it can't be
-# WAF-blocked, and it collapses ~10,000 queries into ~5-10.
+# DEALER INSPIRE BATCHED VIN RESOLVER
+# Checking availability one Algolia query per VIN means thousands of HTTP calls
+# (which ground the Basil group report to a halt). Algolia's multi-query endpoint
+# lets us pack ~50 VIN lookups into ONE request, and each lookup only needs the
+# match count (hitsPerPage=0, no car data), so the payload is tiny. This turns
+# ~10,000 requests into a couple hundred and works for a store of any size —
+# no 1,000-record pagination ceiling. Runs on algolia.net, never the firewall.
 # ======================================================================
 
-def _vin_from_hit(hit):
-    """Pull the 17-char VIN out of an Algolia hit, schema-agnostically."""
-    try:
-        for k, v in hit.items():
-            if 'vin' in k.lower() and isinstance(v, str):
-                m = re.search(r'[A-HJ-NPR-Z0-9]{17}', v.upper())
-                if m:
-                    return m.group(0)
-        m = re.search(r'[A-HJ-NPR-Z0-9]{17}', _json.dumps(hit).upper())
-        return m.group(0) if m else None
-    except Exception:
-        return None
-
-def build_algolia_inventory(domain, cfg, session):
+def resolve_algolia_vins(domain, cfg, vins, session):
     """
-    Pull a Dealer Inspire store's full current inventory.
-    Returns (vin_set, complete):
-      • vin_set  = every VIN currently listed (as far as we could retrieve)
-      • complete = True if we got the WHOLE store (so a report VIN that's absent
-                   is definitively sold). Algolia caps standard pagination at
-                   1000 hits; a store larger than that is 'incomplete' and the
-                   uncovered VINs fall back to the per-VIN query.
-    Returns (None, False) if the pull fails (caller then uses per-VIN behavior).
+    Resolve a list of VINs for one store via batched Algolia multi-queries.
+    Returns {vin: "Available" | "SOLD (Not in Dealer Database)"} for whatever
+    resolved; VINs left out (on failure) fall back to the per-VIN path in scan_url.
     """
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
-    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
     headers = {
         "x-algolia-application-id": app_id,
         "x-algolia-api-key": api_key,
@@ -916,66 +890,57 @@ def build_algolia_inventory(domain, cfg, session):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
-    vins = set()
-    nb_hits = None
-    per_page = 1000
-    page = 0
+    out = {}
+    vins = list(vins)
+    BATCH = 50
     try:
-        while page * per_page < 1000:      # Algolia's default pagination ceiling
-            body = {"params": f"query=&hitsPerPage={per_page}&page={page}"}
-            r = session.post(endpoint, headers=headers, json=body, timeout=10)
+        for i in range(0, len(vins), BATCH):
+            chunk = vins[i:i + BATCH]
+            body = {"requests": [
+                {"indexName": index_name,
+                 "params": f"query={v}&hitsPerPage=0&analytics=false&attributesToRetrieve=[]"}
+                for v in chunk
+            ]}
+            r = session.post(endpoint, headers=headers, json=body, timeout=15)
             if r.status_code != 200:
-                return (vins, False) if vins else (None, False)
-            data = r.json()
-            if nb_hits is None:
-                nb_hits = data.get('nbHits', 0)
-            hits = data.get('hits', [])
-            if not hits:
-                break
-            for h in hits:
-                v = _vin_from_hit(h)
-                if v:
-                    vins.add(v)
-            page += 1
-            if nb_hits is not None and page * per_page >= nb_hits:
-                break
+                break  # leave the rest unresolved -> scan_url per-VIN fallback
+            results = r.json().get("results", [])
+            for v, res in zip(chunk, results):
+                nb = res.get("nbHits", 0)
+                out[v] = "Available" if nb > 0 else "SOLD (Not in Dealer Database)"
     except Exception:
-        return (vins, False) if vins else (None, False)
+        pass
+    return out
 
-    if not vins:
-        return (None, False)
-    complete = (nb_hits is not None) and (nb_hits <= 1000)
-    return (vins, complete)
-
-def build_all_inventories(vdp_urls, session):
+def build_all_vin_status(vdp_urls, session):
     """
-    Pre-pass: for each vaulted, non-ignored Dealer Inspire domain in the report,
-    pull its full inventory once (concurrently). Returns {domain: (vin_set, complete)}.
+    Pre-pass: group the report's VINs by vaulted Dealer Inspire domain and resolve
+    each store's VINs in batches (concurrently). Returns {domain: {vin: status}}.
     """
-    domains = set()
+    by_domain = defaultdict(set)
     for u in vdp_urls:
         d = urlparse(str(u)).netloc.replace('www.', '').lower()
         cfg = DEALER_API_VAULT.get(d)
         if isinstance(cfg, dict) and not cfg.get('ignore') \
            and cfg.get('app_id') and cfg.get('api_key') and cfg.get('index'):
-            domains.add(d)
-    inventories = {}
-    if not domains:
-        return inventories
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(domains))) as ex:
-        futs = {ex.submit(build_algolia_inventory, d, DEALER_API_VAULT[d], session): d
-                for d in domains}
+            v = extract_vin(u)
+            if v != "N/A":
+                by_domain[d].add(v)
+    status = {}
+    if not by_domain:
+        return status
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(by_domain))) as ex:
+        futs = {ex.submit(resolve_algolia_vins, d, DEALER_API_VAULT[d], vins, session): d
+                for d, vins in by_domain.items()}
         for fut in concurrent.futures.as_completed(futs):
             d = futs[fut]
             try:
-                res = fut.result()
+                status[d] = fut.result()
             except Exception:
-                res = (None, False)
-            if res and res[0]:
-                inventories[d] = res
-    return inventories
+                status[d] = {}
+    return status
 
-def scan_url(url, session, ignored_domains, ignore_lock, inventories=None):
+def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
     """
     Decide a VDP's status. Order of operations:
       1. HARD IGNORE: if the sheet flags the domain, or we've already been blocked
@@ -1010,17 +975,12 @@ def scan_url(url, session, ignored_domains, ignore_lock, inventories=None):
         # Can't query Algolia without a VIN — let the scraper read the page.
         return check_universal_status(url, session)
 
-    # --- 3a. FULL-INVENTORY MEMBERSHIP (no per-car request) --------------
-    # If we pulled this store's whole inventory up front, answer from it.
-    inv = (inventories or {}).get(domain)
-    if inv and inv[0] is not None:
-        vin_set, complete = inv
-        if vin in vin_set:
-            return "Available"
-        if complete:
-            # We have the entire store and this VIN isn't in it -> sold.
-            return "SOLD (Not in Dealer Database)"
-        # Incomplete pull (store > 1000): fall through to the per-VIN query below.
+    # --- 3a. PRE-RESOLVED VIA BATCHED LOOKUP (no per-car request) --------
+    # The pre-pass already resolved this store's VINs in bulk; use that answer.
+    pre = (vin_status or {}).get(domain)
+    if pre and vin in pre:
+        return pre[vin]
+    # Not pre-resolved (batch failed for this VIN) -> single per-VIN query below.
 
     # --- 3b. FIRE THE API (single VIN, with clean fallback on failure) ---
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
@@ -1326,22 +1286,20 @@ if run_analysis_clicked:
     ignored_domains = set()
     ignore_lock = threading.Lock()
 
-    # --- FULL-INVENTORY PRE-PASS (Dealer Inspire): pull each vaulted store's
-    # whole catalog once, so most cars resolve by membership with no per-car call.
-    with st.spinner("Pulling live dealer inventories..."):
-        inventories = build_all_inventories(vdp_urls, session)
-    if inventories:
-        pulled = sum(len(v[0]) for v in inventories.values())
-        complete_n = sum(1 for v in inventories.values() if v[1])
+    # --- BATCHED VIN PRE-PASS (Dealer Inspire): resolve each vaulted store's
+    # VINs in bulk (a couple hundred requests total instead of thousands).
+    with st.spinner("Resolving dealer inventory..."):
+        vin_status = build_all_vin_status(vdp_urls, session)
+    if vin_status:
+        resolved = sum(len(v) for v in vin_status.values())
         st.success(
-            f"📦 Pulled full inventory for {len(inventories)} dealer(s) "
-            f"({pulled:,} live vehicles, {complete_n} complete) — these resolve "
-            f"instantly without per-car API calls."
+            f"📦 Resolved {resolved:,} vehicles across {len(vin_status)} Dealer "
+            f"Inspire store(s) via the inventory API — no per-car scraping needed."
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {
-            executor.submit(scan_url, url, session, ignored_domains, ignore_lock, inventories): url
+            executor.submit(scan_url, url, session, ignored_domains, ignore_lock, vin_status): url
             for url in vdp_urls
         }
         total_urls = len(vdp_urls)
