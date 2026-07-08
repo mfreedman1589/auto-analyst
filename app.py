@@ -942,58 +942,151 @@ def _find_secret(obj, name, depth=0):
 def get_marketcheck_key():
     """
     Read the MarketCheck key from Streamlit secrets. Prefers the top level (the
-    correct place) but searches nested sections too — so if it's mistakenly placed
-    under a header like [connections.gsheets], it's still found. '' if missing.
+    correct place) but searches nested sections too, so a key mistakenly placed
+    under a header like [connections.gsheets] is still found. '' if missing.
     """
     try:
         return _find_secret(st.secrets, "MARKETCHECK_KEY")
     except Exception:
         return ""
 
-def marketcheck_dealer_inventory(domain, api_key, session):
+MC_ENDPOINT = "https://api.marketcheck.com/v2/dealerships/inventory"
+MC_PAGE_CAP = 500   # free-tier pagination ceiling (start must stay under this)
+
+def _mc_request(domain, api_key, session, year=None, year_range=None, rows=50, start=0):
+    """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
+    params = {"api_key": api_key, "source": domain, "rows": str(rows), "start": str(start)}
+    if year:
+        params["year"] = str(year)
+    if year_range:
+        params["year_range"] = year_range
+    try:
+        r = session.get(MC_ENDPOINT, params=params, timeout=25)
+        if r.status_code != 200:
+            return (None, None)
+        data = r.json()
+        return (data.get("num_found", 0), data.get("listings", []))
+    except Exception:
+        return (None, None)
+
+def _mc_pull(domain, api_key, session, year=None, year_range=None):
     """
-    Pull a dealer's full active inventory VINs from MarketCheck by website domain,
-    using the dealership syndication endpoint (which returns the dealer's REAL
-    VIN list, not a similarity search). Paginates through the store.
-    Returns (vin_set, complete): complete=True means we retrieved the whole store,
-    so a report VIN that's absent is genuinely sold. (None, False) on failure.
+    Pull all VINs for a dealer (optionally one year or a year_range band), paging
+    in 50s under the free-tier cap. Returns (vin_set, complete): complete means we
+    got the whole slice, so a VIN that's absent is genuinely sold.
     """
-    if not api_key or not domain:
-        return (None, False)
-    endpoint = "https://api.marketcheck.com/v2/dealerships/inventory"
     vins = set()
     num_found = None
     complete = False
     start = 0
-    ROWS = 50
-    MAX_START = 5000   # safety ceiling on pagination
-    try:
-        while start < MAX_START:
-            params = {"api_key": api_key, "source": domain,
-                      "rows": str(ROWS), "start": str(start)}
-            r = session.get(endpoint, params=params, timeout=25)
-            if r.status_code != 200:
-                break   # auth/limit/plan error -> return whatever we have (partial)
-            data = r.json()
-            if num_found is None:
-                num_found = data.get("num_found", 0)
-            listings = data.get("listings", [])
-            if not listings:
-                complete = True   # ran out of pages -> we have everything
-                break
-            for lst in listings:
-                v = str(lst.get("vin", "")).upper().strip()
-                if v:
-                    vins.add(v)
-            start += ROWS
-            if num_found is not None and start >= num_found:
-                complete = True
-                break
-    except Exception:
-        pass
-    if not vins:
-        return (None, False)
+    while start < MC_PAGE_CAP:
+        nf, listings = _mc_request(domain, api_key, session, year=year,
+                                   year_range=year_range, rows=50, start=start)
+        if nf is None:
+            break   # request failed -> partial (won't mark absent VINs as sold)
+        if num_found is None:
+            num_found = nf
+        if not listings:
+            complete = True
+            break
+        for lst in listings:
+            v = str(lst.get("vin", "")).upper().strip()
+            if v:
+                vins.add(v)
+        start += len(listings)
+        if start >= num_found:
+            complete = True
+            break
     return (vins, complete)
+
+def _mc_apply(out, items, vin_set, complete):
+    """Assign Available/Sold to report items from a pulled slice."""
+    for url, vin in items:
+        if vin.upper().strip() in vin_set:
+            out[url] = "Available"
+        elif complete:
+            out[url] = "SOLD (Not in Market Inventory)"
+        # partial slice -> leave the car's original result (no false sold)
+
+def _mc_band(domain, api_key, session, band_items, out):
+    """
+    Resolve a group of report cars by pulling their model years as ONE year_range
+    band (cheap when the years are sparse). band_items = [(url, vin, year_int)].
+    If the band exceeds the cap and comes back incomplete, fall back to per-year
+    pulls so Sold detection stays accurate.
+    """
+    if not band_items:
+        return
+    years = [y for _, _, y in band_items]
+    lo, hi = min(years), max(years)
+    vin_set, complete = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
+    if vin_set or complete:
+        _mc_apply(out, [(u, v) for u, v, _ in band_items], vin_set, complete)
+    if not complete:
+        # Band was over the cap (rare for older years) -> per-year fallback.
+        per_year = defaultdict(list)
+        for u, v, y in band_items:
+            per_year[str(y)].append((u, v))
+        for yr, its in per_year.items():
+            vs, cp = _mc_pull(domain, api_key, session, year=yr)
+            if vs or cp:
+                _mc_apply(out, its, vs, cp)
+
+def resolve_dealer_marketcheck(domain, items, api_key, session):
+    """
+    Resolve one locked dealer's unresolved cars against MarketCheck, minimizing
+    calls. items = [(url, vin, year)].
+      • 1 cheap count call decides the strategy.
+      • Dealers under the 500-car cap: pull the whole store once (~10 calls).
+      • Bigger dealers, tiered by how dense each era is:
+          - newest 3 model years -> pulled individually (they're dense)
+          - 4-9 years old        -> one year_range band
+          - 10+ years old         -> one year_range band
+        Each slice stays under the cap so it comes back complete for accurate Sold.
+    Returns {url: "Available" | "SOLD (Not in Market Inventory)"}.
+    """
+    out = {}
+    total, _ = _mc_request(domain, api_key, session, rows=0)
+    if total is None:
+        return out   # couldn't reach the dealer -> leave cars as-is
+
+    if total <= MC_PAGE_CAP:
+        vin_set, complete = _mc_pull(domain, api_key, session)
+        _mc_apply(out, [(u, v) for u, v, _ in items], vin_set, complete)
+        return out
+
+    # Big dealer: tier by vehicle age.
+    try:
+        current_year = datetime.datetime.now().year
+    except Exception:
+        current_year = max((int(y) for _, _, y in items if str(y).isdigit()), default=2025)
+    recent_cut = current_year - 2   # newest 3 model years -> individual
+    mid_cut = current_year - 9       # 4-9 years old -> mid band; older -> old band
+
+    recent = defaultdict(list)   # "year" -> [(url, vin)]
+    mid_items = []               # [(url, vin, year_int)]
+    old_items = []
+    for url, vin, year in items:
+        if not (year and str(year).isdigit()):
+            continue   # no reliable year on a >cap dealer -> leave unresolved (rare)
+        y = int(year)
+        if y >= recent_cut:
+            recent[str(y)].append((url, vin))
+        elif y >= mid_cut:
+            mid_items.append((url, vin, y))
+        else:
+            old_items.append((url, vin, y))
+
+    # Newest years individually (dense — a single year can approach the cap).
+    for year, yr_items in recent.items():
+        vin_set, complete = _mc_pull(domain, api_key, session, year=year)
+        if vin_set or complete:
+            _mc_apply(out, yr_items, vin_set, complete)
+
+    # Older eras bundled into bands (sparse — many years fit in one pull).
+    _mc_band(domain, api_key, session, mid_items, out)
+    _mc_band(domain, api_key, session, old_items, out)
+    return out
 
 def build_all_vin_status(vdp_urls, session):
     """
@@ -1345,7 +1438,7 @@ if run_analysis_clicked:
     df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
-    st.info(f"Scanning {len(vdp_urls)} Vehicles. Calculating Valuations...")
+    st.info(f"Scanning {len(vdp_urls):,} vehicles for current availability...")
     progress_bar = st.progress(0)
     
     session = requests.Session()
@@ -1386,10 +1479,8 @@ if run_analysis_clicked:
 
     # --- EXTERNAL FALLBACK: resolve anything the normal scan couldn't ------
     # Locked dealers (API rejected + firewall-blocked) leave "ERROR" results.
-    # If a MarketCheck key is configured, look those VINs up in MarketCheck's
-    # daily inventory. Skipped entirely if no key is set (no behavior change).
+    # If a MarketCheck key is set, resolve those via MarketCheck's daily inventory.
     mc_key = get_marketcheck_key()
-    # Group unresolved cars by dealer domain.
     mc_by_domain = defaultdict(list)   # domain -> [(url, vin)]
     for url, res in vdp_results.items():
         if str(res).startswith("ERROR") and "No VIN" not in str(res):
@@ -1400,10 +1491,11 @@ if run_analysis_clicked:
 
     if mc_by_domain:   # there are locked cars to try to rescue
         if not mc_key:
-            st.info("ℹ️ Some dealers couldn't be reached and no MarketCheck key is set, "
-                    "so they're left unresolved. Add MARKETCHECK_KEY in settings to resolve them.")
+            st.info("A few dealers couldn't be scanned directly. To resolve them, "
+                    "the market-inventory lookup needs to be set up in settings.")
         else:
-            # Quick auth check so a bad key surfaces clearly instead of silently.
+            # Verify the lookup is reachable before using it, so a setup problem
+            # surfaces as a clear message instead of silently unresolved cars.
             first_dom = next(iter(mc_by_domain))
             try:
                 probe = session.get("https://api.marketcheck.com/v2/search/car/active",
@@ -1414,30 +1506,25 @@ if run_analysis_clicked:
                 probe_code = None
 
             if probe_code == 401:
-                st.warning("⚠️ MarketCheck rejected the key (401). The MARKETCHECK_KEY in "
-                           "settings isn't a valid/subscribed key — update it with your current "
-                           "working key. Locked dealers left unresolved for now.")
+                st.warning("The market-inventory lookup key was rejected — a few dealers "
+                           "were left unresolved. Please check the key in settings.")
             elif probe_code != 200:
-                st.warning(f"⚠️ Couldn't reach MarketCheck (status {probe_code}). "
-                           "Locked dealers left unresolved.")
+                st.warning("Couldn't reach the market-inventory lookup right now — "
+                           "a few dealers were left unresolved.")
             else:
                 resolved = 0
                 with st.spinner("Checking remaining vehicles against live market inventory..."):
                     for dom, items in mc_by_domain.items():
-                        vin_set, complete = marketcheck_dealer_inventory(dom, mc_key, session)
-                        if not vin_set:
-                            continue   # couldn't pull this dealer -> leave as-is
-                        for url, v in items:
-                            if v.upper().strip() in vin_set:
-                                vdp_results[url] = "Available"; resolved += 1
-                            elif complete:
-                                vdp_results[url] = "SOLD (Not in Market Inventory)"; resolved += 1
-                            # partial pull -> leave original error (no false sold)
+                        year_items = [(url, v, get_year(url)) for url, v in items]
+                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, session)
+                        for url, status in dom_out.items():
+                            vdp_results[url] = status
+                            resolved += 1
                 if resolved:
-                    st.success(f"✅ Recovered {resolved} vehicles from locked dealers via MarketCheck.")
+                    st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market inventory.")
                 else:
-                    st.warning("MarketCheck reached but returned no inventory for these dealers. "
-                               "This can happen if the plan can't paginate their inventory.")
+                    st.info("A few dealers couldn't be matched in the market inventory.")
+
 
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
@@ -1883,10 +1970,10 @@ if st.session_state.current_report_id is not None:
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
     st.markdown("---")
-    st.markdown("### 🚀 Version 4.0 Updates")
-    st.markdown("Welcome to the latest version of the Auto-Sales Intelligence Agent! Here is what's new for your workflow:")
-    st.markdown("1. **⚡ Faster Dealership Setup:** A new 'Quick Add' tool in the sidebar lets you instantly connect a dealership's hidden inventory without waiting to run a full report first.")
-    st.markdown("2. **📄 Bulletproof PDF Exports:** Exporting is now rock-solid. We fixed an issue where fancy formatting (like ™ or ® symbols) in a car's name would crash the PDF downloads.")
-    st.markdown("3. **🛡️ Uninterrupted Scanning:** The tool is now much better at bypassing strict dealership security firewalls, resulting in fewer 'Blocked' errors and faster results.")
-    st.markdown("4. **🏷️ Catching 'Hidden' Sales:** Dealerships often leave sold cars on their site for SEO but mark them 'Out of Stock.' The tool now reads the fine print and rightfully counts these as sold.")
-    st.markdown("5. **🏢 Auto Group Dashboards & Live Filters:** Uploading a multi-site Auto Group report now automatically generates a clean, store-by-store breakdown. Plus, a new interactive slider lets you adjust traffic thresholds on the fly to prove high conversion velocity to your clients.")
+    st.markdown("### What's New")
+    st.markdown("Here's what's new in the Auto-Sales Intelligence Agent:")
+    st.markdown("1. **⚡ Faster dealer setup:** Connect a dealer's inventory in one click with the key bookmarklet, or let Auto-Detect find it for you — and test any dealer's connection instantly, without running a full report first.")
+    st.markdown("2. **🔎 Locked dealers now resolve:** When a dealer's site blocks direct scanning, the tool falls back to live market inventory to still tell you which vehicles sold — so dealers aren't left unresolved wherever coverage exists.")
+    st.markdown("3. **🏷️ Catching 'hidden' sales:** Dealers often leave sold cars on their site marked 'Out of Stock' for SEO. The tool reads the fine print and rightfully counts these as sold.")
+    st.markdown("4. **🏢 Auto Group dashboards & live filters:** A multi-site report automatically generates a clean, store-by-store breakdown, with an interactive slider to adjust traffic thresholds on the fly.")
+    st.markdown("5. **📄 Reliable exports:** PDF and spreadsheet exports handle special characters (like ™ or ®) cleanly, with no crashes.")
