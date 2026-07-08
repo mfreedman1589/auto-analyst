@@ -918,10 +918,35 @@ def resolve_algolia_vins(domain, cfg, vins, session):
 # as errors, and only if a key is set in Streamlit secrets.
 # ======================================================================
 
-def get_marketcheck_key():
-    """Read the MarketCheck key from Streamlit secrets; '' if not configured."""
+def _find_secret(obj, name, depth=0):
+    """Recursively search a secrets mapping for a key by name."""
+    if depth > 4:
+        return ""
     try:
-        return str(st.secrets.get("MARKETCHECK_KEY", "")).strip()
+        v = obj.get(name) if hasattr(obj, "get") else None
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    try:
+        for k in obj:
+            sub = obj[k]
+            if hasattr(sub, "get") or hasattr(sub, "__getitem__"):
+                found = _find_secret(sub, name, depth + 1)
+                if found:
+                    return found
+    except Exception:
+        pass
+    return ""
+
+def get_marketcheck_key():
+    """
+    Read the MarketCheck key from Streamlit secrets. Prefers the top level (the
+    correct place) but searches nested sections too — so if it's mistakenly placed
+    under a header like [connections.gsheets], it's still found. '' if missing.
+    """
+    try:
+        return _find_secret(st.secrets, "MARKETCHECK_KEY")
     except Exception:
         return ""
 
