@@ -953,13 +953,27 @@ def get_marketcheck_key():
 MC_ENDPOINT = "https://api.marketcheck.com/v2/dealerships/inventory"
 MC_PAGE_CAP = 500   # free-tier pagination ceiling (start must stay under this)
 
-def _mc_request(domain, api_key, session, year=None, year_range=None, rows=50, start=0):
+class _CallCounter:
+    """Wraps a requests session to count outbound calls, for usage tracking."""
+    def __init__(self, session):
+        self._s = session
+        self.count = 0
+    def get(self, *a, **k):
+        self.count += 1
+        return self._s.get(*a, **k)
+    def post(self, *a, **k):
+        self.count += 1
+        return self._s.post(*a, **k)
+
+def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, rows=50, start=0):
     """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
     params = {"api_key": api_key, "source": domain, "rows": str(rows), "start": str(start)}
     if year:
         params["year"] = str(year)
     if year_range:
         params["year_range"] = year_range
+    if car_type:
+        params["car_type"] = car_type
     try:
         r = session.get(MC_ENDPOINT, params=params, timeout=25)
         if r.status_code != 200:
@@ -969,11 +983,11 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, rows=50, s
     except Exception:
         return (None, None)
 
-def _mc_pull(domain, api_key, session, year=None, year_range=None):
+def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None):
     """
-    Pull all VINs for a dealer (optionally one year or a year_range band), paging
-    in 50s under the free-tier cap. Returns (vin_set, complete): complete means we
-    got the whole slice, so a VIN that's absent is genuinely sold.
+    Pull all VINs for a dealer (optionally one year, a year_range band, or a
+    car_type), paging in 50s under the free-tier cap. Returns (vin_set, complete):
+    complete means we got the whole slice, so a VIN that's absent is genuinely sold.
     """
     vins = set()
     num_found = None
@@ -981,7 +995,8 @@ def _mc_pull(domain, api_key, session, year=None, year_range=None):
     start = 0
     while start < MC_PAGE_CAP:
         nf, listings = _mc_request(domain, api_key, session, year=year,
-                                   year_range=year_range, rows=50, start=start)
+                                   year_range=year_range, car_type=car_type,
+                                   rows=50, start=start)
         if nf is None:
             break   # request failed -> partial (won't mark absent VINs as sold)
         if num_found is None:
@@ -1080,6 +1095,16 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
     # Newest years individually (dense — a single year can approach the cap).
     for year, yr_items in recent.items():
         vin_set, complete = _mc_pull(domain, api_key, session, year=year)
+        if not complete:
+            # A single recent year over the cap (e.g. a fresh model year with 500+
+            # units) -> sub-slice by car_type so each piece fits and completes.
+            merged = set(vin_set)
+            all_complete = True
+            for ct in ("new", "used", "certified"):
+                vs, cp = _mc_pull(domain, api_key, session, year=year, car_type=ct)
+                merged |= vs
+                all_complete = all_complete and cp
+            vin_set, complete = merged, all_complete
         if vin_set or complete:
             _mc_apply(out, yr_items, vin_set, complete)
 
@@ -1480,6 +1505,7 @@ if run_analysis_clicked:
     # --- EXTERNAL FALLBACK: resolve anything the normal scan couldn't ------
     # Locked dealers (API rejected + firewall-blocked) leave "ERROR" results.
     # If a MarketCheck key is set, resolve those via MarketCheck's daily inventory.
+    mc_calls_used = 0
     mc_key = get_marketcheck_key()
     mc_by_domain = defaultdict(list)   # domain -> [(url, vin)]
     for url, res in vdp_results.items():
@@ -1494,13 +1520,14 @@ if run_analysis_clicked:
             st.info("A few dealers couldn't be scanned directly. To resolve them, "
                     "the market-inventory lookup needs to be set up in settings.")
         else:
+            mc_session = _CallCounter(session)   # counts calls for usage tracking
             # Verify the lookup is reachable before using it, so a setup problem
             # surfaces as a clear message instead of silently unresolved cars.
             first_dom = next(iter(mc_by_domain))
             try:
-                probe = session.get("https://api.marketcheck.com/v2/search/car/active",
-                                    params={"api_key": mc_key, "source": first_dom, "rows": "0"},
-                                    timeout=15)
+                probe = mc_session.get("https://api.marketcheck.com/v2/search/car/active",
+                                       params={"api_key": mc_key, "source": first_dom, "rows": "0"},
+                                       timeout=15)
                 probe_code = probe.status_code
             except Exception:
                 probe_code = None
@@ -1516,12 +1543,14 @@ if run_analysis_clicked:
                 with st.spinner("Checking remaining vehicles against live market inventory..."):
                     for dom, items in mc_by_domain.items():
                         year_items = [(url, v, get_year(url)) for url, v in items]
-                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, session)
+                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, mc_session)
                         for url, status in dom_out.items():
                             vdp_results[url] = status
                             resolved += 1
+                mc_calls_used = mc_session.count
                 if resolved:
-                    st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market inventory.")
+                    st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market "
+                               f"inventory ({mc_calls_used} lookups used).")
                 else:
                     st.info("A few dealers couldn't be matched in the market inventory.")
 
@@ -1553,8 +1582,16 @@ if run_analysis_clicked:
     # --- USAGE TRACKER ---
     try:
         if gsheets_conn is not None:
+            dealer_domains = sorted(set(
+                urlparse(str(u)).netloc.replace('www.', '').lower() for u in vdp_urls
+            ))
             usage_df = gsheets_conn.read(worksheet="UsageStats", ttl=0)
-            new_usage = pd.DataFrame([{"Timestamp": str(datetime.datetime.now(eastern)), "Report": report_id}])
+            new_usage = pd.DataFrame([{
+                "Timestamp": str(datetime.datetime.now(eastern)),
+                "Report": report_id,
+                "Dealer URLs": ", ".join(dealer_domains),
+                "MarketCheck Calls": mc_calls_used,
+            }])
             updated_usage = pd.concat([usage_df, new_usage], ignore_index=True)
             gsheets_conn.update(worksheet="UsageStats", data=updated_usage)
             st.session_state.global_usage_count = len(updated_usage)
