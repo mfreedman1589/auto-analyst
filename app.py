@@ -925,40 +925,50 @@ def get_marketcheck_key():
     except Exception:
         return ""
 
-def resolve_via_marketcheck(vins, api_key, session):
+def marketcheck_dealer_inventory(domain, api_key, session):
     """
-    Look up a list of VINs in MarketCheck's active inventory (batched).
-    Returns {vin: "Available" | "SOLD (Not in Market Inventory)"} for whatever
-    resolved; VINs left out (on failure) keep their original scan result.
+    Pull a dealer's full active inventory VINs from MarketCheck by website domain,
+    using the dealership syndication endpoint (which returns the dealer's REAL
+    VIN list, not a similarity search). Paginates through the store.
+    Returns (vin_set, complete): complete=True means we retrieved the whole store,
+    so a report VIN that's absent is genuinely sold. (None, False) on failure.
     """
-    out = {}
-    if not api_key or not vins:
-        return out
-    endpoint = "https://api.marketcheck.com/v2/search/car/active"
-    vins = list(vins)
-    BATCH = 50
+    if not api_key or not domain:
+        return (None, False)
+    endpoint = "https://api.marketcheck.com/v2/dealerships/inventory"
+    vins = set()
+    num_found = None
+    complete = False
+    start = 0
+    ROWS = 50
+    MAX_START = 5000   # safety ceiling on pagination
     try:
-        for i in range(0, len(vins), BATCH):
-            chunk = vins[i:i + BATCH]
-            params = {
-                "api_key": api_key,
-                "vins": ",".join(chunk),
-                "rows": str(len(chunk)),
-            }
+        while start < MAX_START:
+            params = {"api_key": api_key, "source": domain,
+                      "rows": str(ROWS), "start": str(start)}
             r = session.get(endpoint, params=params, timeout=25)
             if r.status_code != 200:
-                break   # stop on auth/limit error; leave the rest as-is
+                break   # auth/limit/plan error -> return whatever we have (partial)
             data = r.json()
-            active = set()
-            for lst in data.get("listings", []):
+            if num_found is None:
+                num_found = data.get("num_found", 0)
+            listings = data.get("listings", [])
+            if not listings:
+                complete = True   # ran out of pages -> we have everything
+                break
+            for lst in listings:
                 v = str(lst.get("vin", "")).upper().strip()
                 if v:
-                    active.add(v)
-            for v in chunk:
-                out[v] = "Available" if v.upper().strip() in active else "SOLD (Not in Market Inventory)"
+                    vins.add(v)
+            start += ROWS
+            if num_found is not None and start >= num_found:
+                complete = True
+                break
     except Exception:
         pass
-    return out
+    if not vins:
+        return (None, False)
+    return (vins, complete)
 
 def build_all_vin_status(vdp_urls, session):
     """
@@ -1355,18 +1365,26 @@ if run_analysis_clicked:
     # daily inventory. Skipped entirely if no key is set (no behavior change).
     mc_key = get_marketcheck_key()
     if mc_key:
-        mc_vins = {}   # vin -> [urls]
+        # Group unresolved cars by dealer domain.
+        mc_by_domain = defaultdict(list)   # domain -> [(url, vin)]
         for url, res in vdp_results.items():
             if str(res).startswith("ERROR") and "No VIN" not in str(res):
                 v = extract_vin(url)
                 if v != "N/A":
-                    mc_vins.setdefault(v, []).append(url)
-        if mc_vins:
+                    dom = urlparse(str(url)).netloc.replace('www.', '').lower()
+                    mc_by_domain[dom].append((url, v))
+        if mc_by_domain:
             with st.spinner("Checking remaining vehicles against live market inventory..."):
-                mc_status = resolve_via_marketcheck(list(mc_vins.keys()), mc_key, session)
-            for v, status in mc_status.items():
-                for url in mc_vins.get(v, []):
-                    vdp_results[url] = status
+                for dom, items in mc_by_domain.items():
+                    vin_set, complete = marketcheck_dealer_inventory(dom, mc_key, session)
+                    if not vin_set:
+                        continue   # couldn't pull this dealer -> leave as-is
+                    for url, v in items:
+                        if v.upper().strip() in vin_set:
+                            vdp_results[url] = "Available"
+                        elif complete:
+                            vdp_results[url] = "SOLD (Not in Market Inventory)"
+                        # partial pull -> leave original error (no false sold)
 
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
