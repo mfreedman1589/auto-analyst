@@ -965,7 +965,7 @@ class _CallCounter:
         self.count += 1
         return self._s.post(*a, **k)
 
-def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, rows=50, start=0):
+def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None, rows=50, start=0):
     """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
     params = {"api_key": api_key, "source": domain, "rows": str(rows), "start": str(start)}
     if year:
@@ -974,6 +974,8 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
         params["year_range"] = year_range
     if car_type:
         params["car_type"] = car_type
+    if price_range:
+        params["price_range"] = price_range
     try:
         r = session.get(MC_ENDPOINT, params=params, timeout=25)
         if r.status_code != 200:
@@ -983,36 +985,36 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
     except Exception:
         return (None, None)
 
-def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None):
+def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None):
     """
-    Pull all VINs for a dealer (optionally one year, a year_range band, or a
-    car_type), paging in 50s under the free-tier cap. Returns (vin_set, complete):
-    complete means we got the whole slice, so a VIN that's absent is genuinely sold.
+    Pull a slice's VINs, paging in 50s. Aborts early (no paging) if the slice is
+    over the free-tier cap, so an over-cap slice costs ONE call, not ten.
+    Returns (vin_set, complete, num_found): complete means we got the whole slice
+    (so an absent VIN is genuinely sold); num_found is the slice's total.
     """
+    nf, listings = _mc_request(domain, api_key, session, year=year, year_range=year_range,
+                               car_type=car_type, price_range=price_range, rows=50, start=0)
+    if nf is None:
+        return (set(), False, None)
     vins = set()
-    num_found = None
-    complete = False
-    start = 0
-    while start < MC_PAGE_CAP:
-        nf, listings = _mc_request(domain, api_key, session, year=year,
-                                   year_range=year_range, car_type=car_type,
-                                   rows=50, start=start)
-        if nf is None:
-            break   # request failed -> partial (won't mark absent VINs as sold)
-        if num_found is None:
-            num_found = nf
-        if not listings:
-            complete = True
+    for lst in listings:
+        v = str(lst.get("vin", "")).upper().strip()
+        if v:
+            vins.add(v)
+    if nf > MC_PAGE_CAP:
+        return (vins, False, nf)   # over cap -> caller sub-slices; don't waste pages
+    start = len(listings)
+    while start < nf and start < MC_PAGE_CAP:
+        nf2, more = _mc_request(domain, api_key, session, year=year, year_range=year_range,
+                                car_type=car_type, price_range=price_range, rows=50, start=start)
+        if nf2 is None or not more:
             break
-        for lst in listings:
+        for lst in more:
             v = str(lst.get("vin", "")).upper().strip()
             if v:
                 vins.add(v)
-        start += len(listings)
-        if start >= num_found:
-            complete = True
-            break
-    return (vins, complete)
+        start += len(more)
+    return (vins, start >= nf, nf)
 
 def _mc_apply(out, items, vin_set, complete):
     """Assign Available/Sold to report items from a pulled slice."""
@@ -1023,51 +1025,96 @@ def _mc_apply(out, items, vin_set, complete):
             out[url] = "SOLD (Not in Market Inventory)"
         # partial slice -> leave the car's original result (no false sold)
 
+def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0):
+    """
+    Pull a car_type slice within a price band [lo, hi]. If that band is STILL over
+    the cap, split it at the midpoint and recurse — so any distribution eventually
+    fits. Returns (vin_set, complete).
+    """
+    vins, complete, nf = _mc_pull(domain, api_key, session, year=year,
+                                  car_type=car_type, price_range=f"{lo}-{hi}")
+    if nf is None:
+        return (set(), False)
+    if complete:
+        return (vins, True)
+    if depth >= 4 or (hi - lo) <= 1000:
+        return (vins, False)   # can't split further -> partial (never false-sold)
+    mid = (lo + hi) // 2
+    v1, c1 = _mc_pull_priced(domain, api_key, session, year, car_type, lo, mid, depth + 1)
+    v2, c2 = _mc_pull_priced(domain, api_key, session, year, car_type, mid, hi, depth + 1)
+    return (vins | v1 | v2, c1 and c2)
+
+# Starting price bands for a car_type slice that's over the cap (tuned for autos;
+# any band still too large is split further by _mc_pull_priced).
+MC_PRICE_BANDS = [(0, 45000), (45000, 60000), (60000, 80000), (80000, 100000000)]
+
+def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
+    """Resolve one model year; if over the cap, split by car_type, then by price."""
+    vins, complete, nf = _mc_pull(domain, api_key, session, year=year)
+    if nf is None:
+        return
+    if complete:
+        _mc_apply(out, yr_items, vins, True)
+        return
+    # Over cap -> split by car_type (each piece usually fits under the cap).
+    merged = set(vins)
+    all_complete = True
+    for ct in ("new", "used", "certified"):
+        vs, cp, nf2 = _mc_pull(domain, api_key, session, year=year, car_type=ct)
+        if nf2 is None:
+            all_complete = False
+            continue
+        if cp:
+            merged |= vs
+        else:
+            # A single car_type still over the cap (e.g. 694 new units) -> split
+            # it by price band, recursing on any band that's itself too large.
+            for lo, hi in MC_PRICE_BANDS:
+                pvs, pcp = _mc_pull_priced(domain, api_key, session, year, ct, lo, hi)
+                merged |= pvs
+                all_complete = all_complete and pcp
+    _mc_apply(out, yr_items, merged, all_complete)
+
 def _mc_band(domain, api_key, session, band_items, out):
     """
-    Resolve a group of report cars by pulling their model years as ONE year_range
-    band (cheap when the years are sparse). band_items = [(url, vin, year_int)].
-    If the band exceeds the cap and comes back incomplete, fall back to per-year
-    pulls so Sold detection stays accurate.
+    Resolve a group of older report years as ONE year_range band (cheap when the
+    years are sparse). If the band is over the cap, fall back to per-year.
+    band_items = [(url, vin, year_int)].
     """
     if not band_items:
         return
     years = [y for _, _, y in band_items]
     lo, hi = min(years), max(years)
-    vin_set, complete = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
-    if vin_set or complete:
-        _mc_apply(out, [(u, v) for u, v, _ in band_items], vin_set, complete)
-    if not complete:
-        # Band was over the cap (rare for older years) -> per-year fallback.
-        per_year = defaultdict(list)
-        for u, v, y in band_items:
-            per_year[str(y)].append((u, v))
-        for yr, its in per_year.items():
-            vs, cp = _mc_pull(domain, api_key, session, year=yr)
-            if vs or cp:
-                _mc_apply(out, its, vs, cp)
+    vins, complete, nf = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
+    if nf is None:
+        return
+    if complete:
+        _mc_apply(out, [(u, v) for u, v, _ in band_items], vins, True)
+        return
+    # Band over the cap -> resolve each year on its own.
+    per_year = defaultdict(list)
+    for u, v, y in band_items:
+        per_year[str(y)].append((u, v))
+    for yr, its in per_year.items():
+        _mc_resolve_year(domain, api_key, session, yr, its, out)
 
 def resolve_dealer_marketcheck(domain, items, api_key, session):
     """
     Resolve one locked dealer's unresolved cars against MarketCheck, minimizing
-    calls. items = [(url, vin, year)].
-      • 1 cheap count call decides the strategy.
-      • Dealers under the 500-car cap: pull the whole store once (~10 calls).
-      • Bigger dealers, tiered by how dense each era is:
-          - newest 3 model years -> pulled individually (they're dense)
-          - 4-9 years old        -> one year_range band
-          - 10+ years old         -> one year_range band
-        Each slice stays under the cap so it comes back complete for accurate Sold.
+    calls. items = [(url, vin, year)]. Each slice is size-checked as it's pulled
+    (aborting after one call if it's over the cap) so we never waste pages:
+      • Small dealers (under the cap): the whole store in one pass.
+      • Big dealers, tiered by age: newest years individually (dense; split by
+        car_type if a single year is over the cap), older years bundled into bands.
     Returns {url: "Available" | "SOLD (Not in Market Inventory)"}.
     """
     out = {}
-    total, _ = _mc_request(domain, api_key, session, rows=0)
-    if total is None:
-        return out   # couldn't reach the dealer -> leave cars as-is
-
-    if total <= MC_PAGE_CAP:
-        vin_set, complete = _mc_pull(domain, api_key, session)
-        _mc_apply(out, [(u, v) for u, v, _ in items], vin_set, complete)
+    # Try the whole store; if it's over the cap this aborts after one call.
+    vins, complete, nf = _mc_pull(domain, api_key, session)
+    if nf is None:
+        return out
+    if complete:
+        _mc_apply(out, [(u, v) for u, v, _ in items], vins, True)
         return out
 
     # Big dealer: tier by vehicle age.
@@ -1092,23 +1139,8 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
         else:
             old_items.append((url, vin, y))
 
-    # Newest years individually (dense — a single year can approach the cap).
     for year, yr_items in recent.items():
-        vin_set, complete = _mc_pull(domain, api_key, session, year=year)
-        if not complete:
-            # A single recent year over the cap (e.g. a fresh model year with 500+
-            # units) -> sub-slice by car_type so each piece fits and completes.
-            merged = set(vin_set)
-            all_complete = True
-            for ct in ("new", "used", "certified"):
-                vs, cp = _mc_pull(domain, api_key, session, year=year, car_type=ct)
-                merged |= vs
-                all_complete = all_complete and cp
-            vin_set, complete = merged, all_complete
-        if vin_set or complete:
-            _mc_apply(out, yr_items, vin_set, complete)
-
-    # Older eras bundled into bands (sparse — many years fit in one pull).
+        _mc_resolve_year(domain, api_key, session, year, yr_items, out)
     _mc_band(domain, api_key, session, mid_items, out)
     _mc_band(domain, api_key, session, old_items, out)
     return out
