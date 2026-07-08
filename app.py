@@ -108,9 +108,8 @@ DEALER_API_VAULT, vault_df, gsheets_conn, VAULT_LOADED_OK = load_vault()
 
 if not VAULT_LOADED_OK:
     st.warning(
-        "⚠️ Could not reach the Google Sheet vault. Running on a small emergency "
-        "fallback list — dealership syncs and IGNORE flags won't be saved until the "
-        "connection is restored.",
+        "Couldn't load saved dealer settings right now — some dealers may not "
+        "resolve, and new dealers can't be saved until the connection is back.",
         icon="⚠️",
     )
 
@@ -274,7 +273,7 @@ def test_algolia_creds(app_id, api_key, index, domain=""):
                "This dealer is ready to resolve via the inventory API."
     if r.status_code in (401, 403):
         return False, "❌ Algolia rejected the key (403)", \
-               "The key is domain-locked and even the matching Referer didn't satisfy it (likely IP-restricted or a true secured key). This dealer will have to run on the scraper."
+               "The saved key is rejected even with a matching Referer. First, re-grab a fresh key with the 🔑 bookmark in case the saved one is just stale. If a fresh key is ALSO rejected, the dealer's platform has locked it — it can't be reached from here, so mark it Ignore (not scannable)."
     if r.status_code == 404:
         return False, "❌ Index not found (404)", \
                f"The App ID + Key may be fine, but the Index Name '{index}' doesn't exist. Re-check the index."
@@ -897,8 +896,7 @@ def resolve_algolia_vins(domain, cfg, vins, session):
         for i in range(0, len(vins), BATCH):
             chunk = vins[i:i + BATCH]
             body = {"requests": [
-                {"indexName": index_name,
-                 "params": f"query={v}&hitsPerPage=0&analytics=false&attributesToRetrieve=[]"}
+                {"indexName": index_name, "params": f"query={v}&hitsPerPage=0"}
                 for v in chunk
             ]}
             r = session.post(endpoint, headers=headers, json=body, timeout=15)
@@ -953,41 +951,37 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
     """
     domain = urlparse(str(url)).netloc.replace('www.', '').lower()
 
-    # --- 1. HARD KILL SWITCH ---------------------------------------------
-    with ignore_lock:
-        blocked_this_run = domain in ignored_domains
+    # --- 1. NON-DEALER-INSPIRE DEALERS -> SCRAPER ------------------------
     cfg = DEALER_API_VAULT.get(domain)
     sheet_says_ignore = isinstance(cfg, dict) and cfg.get('ignore') is True
-
-    if blocked_this_run or sheet_says_ignore:
-        return check_universal_status(url, session)
-
-    # --- 2. NO USABLE CREDENTIALS ----------------------------------------
     has_creds = (
         isinstance(cfg, dict)
         and cfg.get('app_id') and cfg.get('api_key') and cfg.get('index')
     )
-    if not has_creds:
+    # Dealers marked ignore, or with no API creds, run on a scrapable platform.
+    if sheet_says_ignore or not has_creds:
         return check_universal_status(url, session)
+
+    # --- 2. DEALER INSPIRE (Algolia) DEALERS -----------------------------
+    # These sites are firewall-protected, so scraping them is doomed — if the
+    # API can't answer, we fail fast rather than dragging the report through a
+    # blocked scrape.
+    with ignore_lock:
+        if domain in ignored_domains:          # this store's key already rejected
+            return "ERROR (Inventory Unavailable)"
 
     vin = extract_vin(url)
     if vin == "N/A":
-        # Can't query Algolia without a VIN — let the scraper read the page.
-        return check_universal_status(url, session)
+        return "ERROR (Inventory Unavailable)"
 
-    # --- 3a. PRE-RESOLVED VIA BATCHED LOOKUP (no per-car request) --------
-    # The pre-pass already resolved this store's VINs in bulk; use that answer.
+    # Resolved in bulk by the pre-pass?
     pre = (vin_status or {}).get(domain)
     if pre and vin in pre:
         return pre[vin]
-    # Not pre-resolved (batch failed for this VIN) -> single per-VIN query below.
 
-    # --- 3b. FIRE THE API (single VIN, with clean fallback on failure) ---
+    # --- 3. PER-VIN FALLBACK (only if the bulk pass missed this VIN) ------
     app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
     api_endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index_name}/query"
-    # Referer/Origin match what a browser on the dealer's site sends — this is
-    # what satisfies referer-restricted search keys (e.g. Cars Commerce sites that
-    # only authorize their own domain). Harmless for unrestricted keys.
     api_headers = {
         "x-algolia-application-id": app_id,
         "x-algolia-api-key": api_key,
@@ -997,28 +991,24 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
-
     try:
         resp = session.post(api_endpoint, headers=api_headers,
                             json={"params": f"query={vin}"}, timeout=5)
     except Exception:
-        # Network/DNS/timeout talking to the API -> scraper.
-        return check_universal_status(url, session)
+        return "ERROR (Inventory Unavailable)"
 
     if resp.status_code == 200:
         try:
             hits = resp.json().get("nbHits", 0)
         except Exception:
-            return check_universal_status(url, session)
+            return "ERROR (Inventory Unavailable)"
         return "Available" if hits > 0 else "SOLD (Not in Dealer Database)"
 
-    # Blocked / unauthorized / rate-limited: kill this domain's API for the run.
+    # Key rejected / rate-limited -> blacklist this store so the rest fail fast.
     if resp.status_code in (401, 403, 429):
         with ignore_lock:
             ignored_domains.add(domain)
-
-    # Any non-200 -> fall back to the scraper instead of returning an ERROR.
-    return check_universal_status(url, session)
+    return "ERROR (Inventory Unavailable)"
 
 # --- THE UNIVERSAL VISUAL SCRAPER ---------------------------------------
 def check_universal_status(url, session):
@@ -1286,16 +1276,9 @@ if run_analysis_clicked:
     ignored_domains = set()
     ignore_lock = threading.Lock()
 
-    # --- BATCHED VIN PRE-PASS (Dealer Inspire): resolve each vaulted store's
-    # VINs in bulk (a couple hundred requests total instead of thousands).
-    with st.spinner("Resolving dealer inventory..."):
+    # Resolve vaulted dealers' inventory in bulk before the per-car scan.
+    with st.spinner("Checking dealer inventories..."):
         vin_status = build_all_vin_status(vdp_urls, session)
-    if vin_status:
-        resolved = sum(len(v) for v in vin_status.values())
-        st.success(
-            f"📦 Resolved {resolved:,} vehicles across {len(vin_status)} Dealer "
-            f"Inspire store(s) via the inventory API — no per-car scraping needed."
-        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         future_to_url = {
