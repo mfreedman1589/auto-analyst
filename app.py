@@ -1364,27 +1364,55 @@ if run_analysis_clicked:
     # If a MarketCheck key is configured, look those VINs up in MarketCheck's
     # daily inventory. Skipped entirely if no key is set (no behavior change).
     mc_key = get_marketcheck_key()
-    if mc_key:
-        # Group unresolved cars by dealer domain.
-        mc_by_domain = defaultdict(list)   # domain -> [(url, vin)]
-        for url, res in vdp_results.items():
-            if str(res).startswith("ERROR") and "No VIN" not in str(res):
-                v = extract_vin(url)
-                if v != "N/A":
-                    dom = urlparse(str(url)).netloc.replace('www.', '').lower()
-                    mc_by_domain[dom].append((url, v))
-        if mc_by_domain:
-            with st.spinner("Checking remaining vehicles against live market inventory..."):
-                for dom, items in mc_by_domain.items():
-                    vin_set, complete = marketcheck_dealer_inventory(dom, mc_key, session)
-                    if not vin_set:
-                        continue   # couldn't pull this dealer -> leave as-is
-                    for url, v in items:
-                        if v.upper().strip() in vin_set:
-                            vdp_results[url] = "Available"
-                        elif complete:
-                            vdp_results[url] = "SOLD (Not in Market Inventory)"
-                        # partial pull -> leave original error (no false sold)
+    # Group unresolved cars by dealer domain.
+    mc_by_domain = defaultdict(list)   # domain -> [(url, vin)]
+    for url, res in vdp_results.items():
+        if str(res).startswith("ERROR") and "No VIN" not in str(res):
+            v = extract_vin(url)
+            if v != "N/A":
+                dom = urlparse(str(url)).netloc.replace('www.', '').lower()
+                mc_by_domain[dom].append((url, v))
+
+    if mc_by_domain:   # there are locked cars to try to rescue
+        if not mc_key:
+            st.info("ℹ️ Some dealers couldn't be reached and no MarketCheck key is set, "
+                    "so they're left unresolved. Add MARKETCHECK_KEY in settings to resolve them.")
+        else:
+            # Quick auth check so a bad key surfaces clearly instead of silently.
+            first_dom = next(iter(mc_by_domain))
+            try:
+                probe = session.get("https://api.marketcheck.com/v2/search/car/active",
+                                    params={"api_key": mc_key, "source": first_dom, "rows": "0"},
+                                    timeout=15)
+                probe_code = probe.status_code
+            except Exception:
+                probe_code = None
+
+            if probe_code == 401:
+                st.warning("⚠️ MarketCheck rejected the key (401). The MARKETCHECK_KEY in "
+                           "settings isn't a valid/subscribed key — update it with your current "
+                           "working key. Locked dealers left unresolved for now.")
+            elif probe_code != 200:
+                st.warning(f"⚠️ Couldn't reach MarketCheck (status {probe_code}). "
+                           "Locked dealers left unresolved.")
+            else:
+                resolved = 0
+                with st.spinner("Checking remaining vehicles against live market inventory..."):
+                    for dom, items in mc_by_domain.items():
+                        vin_set, complete = marketcheck_dealer_inventory(dom, mc_key, session)
+                        if not vin_set:
+                            continue   # couldn't pull this dealer -> leave as-is
+                        for url, v in items:
+                            if v.upper().strip() in vin_set:
+                                vdp_results[url] = "Available"; resolved += 1
+                            elif complete:
+                                vdp_results[url] = "SOLD (Not in Market Inventory)"; resolved += 1
+                            # partial pull -> leave original error (no false sold)
+                if resolved:
+                    st.success(f"✅ Recovered {resolved} vehicles from locked dealers via MarketCheck.")
+                else:
+                    st.warning("MarketCheck reached but returned no inventory for these dealers. "
+                               "This can happen if the plan can't paginate their inventory.")
 
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
