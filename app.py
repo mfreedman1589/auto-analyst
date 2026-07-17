@@ -12,6 +12,10 @@ from bs4 import BeautifulSoup
 import datetime
 import pytz
 from fpdf import FPDF
+import io
+import matplotlib
+matplotlib.use("Agg")   # headless rendering for chart images
+import matplotlib.pyplot as plt
 import os
 import html
 import random
@@ -344,8 +348,160 @@ def check_password():
 if not check_password():
     st.stop()
 
+# --- SHARED EXPORT VISUALS (Premion palette) ---
+# Charts are drawn with matplotlib so they render to PNG reliably in any
+# environment (Plotly needs kaleido, which isn't guaranteed on the host). The
+# data prep mirrors the on-screen dashboard exactly, so exports match the app.
+PREMION_NAVY = "#0A1F5C"
+PREMION_PERIWINKLE = "#8593E8"
+PREMION_ORANGE = "#E8743B"
+PREMION_BLUE = "#2E6FB7"
+PREMION_GREEN = "#5FBFA0"
+PREMION_RED = "#C0504D"
+
+def _fig_to_png_bytes(fig, w_in, h_in):
+    fig.set_size_inches(w_in, h_in)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def build_summary_chart_images(df, sold_df):
+    """
+    Render the three Executive Summary charts (Traffic Mix, Sales Mix, Sold Value
+    Tiers) to PNG bytes for embedding in PDF/PPTX. Returns a dict of BytesIO
+    (keys may be absent when there's no sold data). Never raises.
+    """
+    images = {}
+    try:
+        traffic = (df.groupby('Category')['Attributed Unique Visitors'].sum()
+                     .reset_index().sort_values('Attributed Unique Visitors', ascending=False))
+        fig, ax = plt.subplots()
+        ax.bar(traffic['Category'], traffic['Attributed Unique Visitors'], color=PREMION_BLUE)
+        ax.set_ylabel("Unique Visits"); ax.set_title("Traffic Mix", fontweight="bold", color=PREMION_NAVY)
+        ax.tick_params(axis='x', rotation=45)
+        for lbl in ax.get_xticklabels(): lbl.set_ha('right'); lbl.set_fontsize(8)
+        for s in ('top', 'right'): ax.spines[s].set_visible(False)
+        images['traffic'] = _fig_to_png_bytes(fig, 5.2, 3.4)
+    except Exception:
+        pass
+    if sold_df is not None and not sold_df.empty:
+        try:
+            tc = sold_df['Type'].value_counts()
+            fig, ax = plt.subplots()
+            cmap = {'New': PREMION_BLUE, 'Used': PREMION_RED}
+            ax.pie(tc.values, labels=tc.index, autopct='%1.1f%%', startangle=90,
+                   colors=[cmap.get(t, PREMION_PERIWINKLE) for t in tc.index],
+                   textprops={'color': 'white', 'fontweight': 'bold'})
+            ax.set_title("Sales Mix (New vs Used)", fontweight="bold", color=PREMION_NAVY)
+            images['salesmix'] = _fig_to_png_bytes(fig, 4.2, 3.6)
+        except Exception:
+            pass
+        try:
+            tier = sold_df['Price Tier'].value_counts()
+            palette = [PREMION_GREEN, PREMION_ORANGE, PREMION_PERIWINKLE, PREMION_BLUE, PREMION_RED]
+            fig, ax = plt.subplots()
+            ax.pie(tier.values, labels=tier.index, autopct='%1.1f%%', startangle=90,
+                   colors=palette[:len(tier)],
+                   textprops={'color': 'white', 'fontweight': 'bold', 'fontsize': 8})
+            ax.set_title("Sold Value Tiers", fontweight="bold", color=PREMION_NAVY)
+            images['tiers'] = _fig_to_png_bytes(fig, 4.2, 3.6)
+        except Exception:
+            pass
+    return images
+
+def build_pptx_report(df, sold_df, metrics, chart_images, report_title):
+    """
+    Build a Premion-styled PowerPoint: a title/KPI slide plus a charts slide,
+    matching the look of the attribution deck (navy band, KPI cards). Returns
+    PPTX file bytes, or None if python-pptx isn't available.
+    """
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    except Exception:
+        return None
+
+    NAVY = RGBColor(0x0A, 0x1F, 0x5C)
+    PERI = RGBColor(0x85, 0x93, 0xE8)
+    WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)   # 16:9
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    def add_text(slide, left, top, width, height, text, size, color,
+                 bold=False, align=PP_ALIGN.LEFT):
+        tb = slide.shapes.add_textbox(left, top, width, height)
+        tf = tb.text_frame; tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        p = tf.paragraphs[0]; p.alignment = align
+        r = p.add_run(); r.text = text
+        r.font.size = Pt(size); r.font.bold = bold; r.font.color.rgb = color
+        r.font.name = "Arial"
+        return tb
+
+    def fill_rect(slide, left, top, width, height, color):
+        from pptx.enum.shapes import MSO_SHAPE
+        shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+        shp.fill.solid(); shp.fill.fore_color.rgb = color
+        shp.line.fill.background()
+        return shp
+
+    # --- Slide 1: title band + KPI cards ---
+    s1 = prs.slides.add_slide(blank)
+    band = fill_rect(s1, Inches(0), Inches(0), prs.slide_width, Inches(1.6), NAVY)
+    add_text(s1, Inches(0.5), Inches(0.15), Inches(12), Inches(0.8),
+             "Premion Website Attribution", 34, PERI, bold=True)
+    add_text(s1, Inches(0.5), Inches(0.9), Inches(12), Inches(0.5),
+             report_title, 18, WHITE, bold=True)
+
+    kpis = [("Units Sold (Attributed)", str(metrics.get('units', 0))),
+            ("Est. Revenue Sold", f"${metrics.get('revenue', 0):,.0f}"),
+            ("Total Pipeline Value", f"${metrics.get('pipeline', 0):,.0f}"),
+            ("Look-to-Book Ratio", f"{metrics.get('ltb', 0):.1f}%")]
+    card_w = Inches(2.9); card_h = Inches(1.9); gap = Inches(0.28)
+    total_w = card_w * 4 + gap * 3
+    x0 = (prs.slide_width - total_w) / 2
+    y0 = Inches(2.5)
+    for i, (label, val) in enumerate(kpis):
+        cx = x0 + i * (card_w + gap)
+        fill_rect(s1, cx, y0, card_w, card_h, NAVY)
+        add_text(s1, cx, y0 + Inches(0.25), card_w, Inches(0.5), label, 12, WHITE,
+                 align=PP_ALIGN.CENTER)
+        add_text(s1, cx, y0 + Inches(0.8), card_w, Inches(0.9), val, 30, WHITE,
+                 bold=True, align=PP_ALIGN.CENTER)
+    add_text(s1, Inches(0.5), Inches(6.9), Inches(6), Inches(0.4),
+             "TEGNA  |  PREMION", 12, NAVY, bold=True)
+
+    # --- Slide 2: charts ---
+    s2 = prs.slides.add_slide(blank)
+    fill_rect(s2, Inches(0), Inches(0), prs.slide_width, Inches(1.1), NAVY)
+    add_text(s2, Inches(0.5), Inches(0.2), Inches(12), Inches(0.7),
+             "Attribution Summary", 26, PERI, bold=True)
+    if chart_images.get('traffic'):
+        s2.shapes.add_picture(chart_images['traffic'], Inches(0.4), Inches(1.5), height=Inches(3.6))
+        chart_images['traffic'].seek(0)
+    if chart_images.get('salesmix'):
+        s2.shapes.add_picture(chart_images['salesmix'], Inches(6.4), Inches(1.4), height=Inches(2.9))
+        chart_images['salesmix'].seek(0)
+    if chart_images.get('tiers'):
+        s2.shapes.add_picture(chart_images['tiers'], Inches(9.6), Inches(1.4), height=Inches(2.9))
+        chart_images['tiers'].seek(0)
+    add_text(s2, Inches(0.5), Inches(6.9), Inches(6), Inches(0.4),
+             "TEGNA  |  PREMION", 12, NAVY, bold=True)
+
+    out = io.BytesIO()
+    prs.save(out); out.seek(0)
+    return out.read()
+
 # --- PDF GENERATOR FUNCTION ---
-def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None, include_dealer_details=False):
+def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_group=None, include_dealer_details=False, chart_images=None):
     # HELPER: Sanitizes scraped text so it doesn't crash the PDF encoder
     def safe_str(text):
         if pd.isna(text): return ""
@@ -424,7 +580,36 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, f" {sec_market}. Market Insights", ln=True, fill=True)
     pdf.ln(5)
-    
+
+    # Visual charts (matching the on-screen dashboard) embedded as images.
+    if chart_images:
+        try:
+            import tempfile
+            saved = {}
+            for key in ('traffic', 'salesmix', 'tiers'):
+                if chart_images.get(key):
+                    chart_images[key].seek(0)
+                    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                    tf.write(chart_images[key].read()); tf.close()
+                    saved[key] = tf.name
+                    chart_images[key].seek(0)
+            if saved.get('traffic'):
+                pdf.image(saved['traffic'], x=15, w=180)
+                pdf.ln(2)
+            if saved.get('salesmix') or saved.get('tiers'):
+                y = pdf.get_y()
+                if saved.get('salesmix'):
+                    pdf.image(saved['salesmix'], x=15, y=y, w=88)
+                if saved.get('tiers'):
+                    pdf.image(saved['tiers'], x=107, y=y, w=88)
+                pdf.ln(75)
+            for path in saved.values():
+                try: os.remove(path)
+                except Exception: pass
+            pdf.ln(4)
+        except Exception:
+            pass  # charts are a bonus; never let them break the PDF
+
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Unique Visits by Page Type)", ln=True)
     pdf.set_font("Arial", "B", 9)
@@ -2095,15 +2280,29 @@ if st.session_state.current_report_id is not None:
         include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in PDF", value=False)
         
     st.write("") 
-    
-    ex1, ex2, ex3 = st.columns(3)
+
+    # Build the dashboard charts as images once, shared by the PDF and PPTX.
+    chart_images = build_summary_chart_images(df, sold_df)
+    pptx_metrics = {'units': m_units, 'revenue': m_rev, 'pipeline': m_pipe, 'ltb': m_ltb}
+
+    ex1, ex2, ex3, ex4 = st.columns(4)
     with ex1:
         metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export, include_dealer_details)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export, include_dealer_details, chart_images=chart_images)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
-        st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
+        pptx_data = build_pptx_report(df, sold_df, pptx_metrics, chart_images,
+                                      st.session_state.current_report_id)
+        if pptx_data:
+            st.download_button("📥 Download PowerPoint", data=pptx_data,
+                               file_name=f"{st.session_state.current_report_id}_Summary.pptx",
+                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        else:
+            st.button("📥 Download PowerPoint", disabled=True,
+                      help="PowerPoint export needs the python-pptx package on the host.")
     with ex3:
+        st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
+    with ex4:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
 
     st.divider()
