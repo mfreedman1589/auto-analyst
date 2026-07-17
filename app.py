@@ -983,6 +983,11 @@ MC_PAGE_CAP = _mc_setting_int("MARKETCHECK_PAGE_CAP", 500)
 # settings (suggested: 75 on the free plan, 150 on Basic).
 MC_BUDGET = _mc_setting_int("MARKETCHECK_BUDGET", 75)
 
+# Cars fetched per lookup. Free plan serves small pages regardless of what's
+# requested, so the safe default is 50. Basic honors larger pages — set
+# MARKETCHECK_PAGE_SIZE = 200 in settings and big dealers cost ~1/4 the calls.
+MC_PAGE_SIZE = _mc_setting_int("MARKETCHECK_PAGE_SIZE", 50)
+
 class _MCStop(Exception):
     """Raised by the governor to halt the market-lookup phase immediately."""
     def __init__(self, reason):
@@ -1063,7 +1068,7 @@ def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None
     (so an absent VIN is genuinely sold); num_found is the slice's total.
     """
     nf, listings = _mc_request(domain, api_key, session, year=year, year_range=year_range,
-                               car_type=car_type, price_range=price_range, rows=50, start=0)
+                               car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=0)
     if nf is None:
         return (set(), False, None)
     vins = set()
@@ -1076,7 +1081,7 @@ def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None
     start = len(listings)
     while start < nf and start < MC_PAGE_CAP:
         nf2, more = _mc_request(domain, api_key, session, year=year, year_range=year_range,
-                                car_type=car_type, price_range=price_range, rows=50, start=start)
+                                car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=start)
         if nf2 is None or not more:
             break
         for lst in more:
@@ -1095,11 +1100,13 @@ def _mc_apply(out, items, vin_set, complete):
             out[url] = "SOLD (Not in Market Inventory)"
         # partial slice -> leave the car's original result (no false sold)
 
-def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0):
+def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0, parent_nf=None):
     """
     Pull a car_type slice within a price band [lo, hi]. If that band is STILL over
     the cap, split it at the midpoint and recurse — so any distribution eventually
-    fits. Returns (vin_set, complete).
+    fits. Stops splitting if a narrower band doesn't actually shrink the results
+    (filter ignored by the data), so calls are never wasted on useless recursion.
+    Returns (vin_set, complete).
     """
     vins, complete, nf = _mc_pull(domain, api_key, session, year=year,
                                   car_type=car_type, price_range=f"{lo}-{hi}")
@@ -1107,11 +1114,13 @@ def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0):
         return (set(), False)
     if complete:
         return (vins, True)
+    if parent_nf is not None and nf >= parent_nf:
+        return (vins, False)   # band didn't narrow anything -> splitting is futile
     if depth >= 4 or (hi - lo) <= 1000:
         return (vins, False)   # can't split further -> partial (never false-sold)
     mid = (lo + hi) // 2
-    v1, c1 = _mc_pull_priced(domain, api_key, session, year, car_type, lo, mid, depth + 1)
-    v2, c2 = _mc_pull_priced(domain, api_key, session, year, car_type, mid, hi, depth + 1)
+    v1, c1 = _mc_pull_priced(domain, api_key, session, year, car_type, lo, mid, depth + 1, nf)
+    v2, c2 = _mc_pull_priced(domain, api_key, session, year, car_type, mid, hi, depth + 1, nf)
     return (vins | v1 | v2, c1 and c2)
 
 # Starting price bands for a car_type slice that's over the cap (tuned for autos;
@@ -1140,7 +1149,8 @@ def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
             # A single car_type still over the cap (e.g. 694 new units) -> split
             # it by price band, recursing on any band that's itself too large.
             for lo, hi in MC_PRICE_BANDS:
-                pvs, pcp = _mc_pull_priced(domain, api_key, session, year, ct, lo, hi)
+                pvs, pcp = _mc_pull_priced(domain, api_key, session, year, ct, lo, hi,
+                                           parent_nf=nf2)
                 merged |= pvs
                 all_complete = all_complete and pcp
     _mc_apply(out, yr_items, merged, all_complete)
@@ -1741,10 +1751,11 @@ if st.session_state.history:
         st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
         st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
         st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
+        st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
         if isinstance(st.session_state.get('mc_month_usage'), int):
             st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}` (from report log)")
-        st.caption("Budget and page cap can be changed in settings via "
-                   "MARKETCHECK_BUDGET and MARKETCHECK_PAGE_CAP.")
+        st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
+                   "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
