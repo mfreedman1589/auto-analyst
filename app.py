@@ -359,6 +359,38 @@ PREMION_BLUE = "#2E6FB7"
 PREMION_GREEN = "#5FBFA0"
 PREMION_RED = "#C0504D"
 
+# Trim/drivetrain tokens used to roll vehicle names up to Make + Model for the
+# aggregated "Top Sold/Missed Models" views. Detail tables keep the full name.
+TRIM_TOKENS = {
+    'lt', 'ltz', 'ls', 'rs', 'ss', 'rst', 'z71', 'zr2', 'premier', 'custom',
+    'high', 'denali', 'elevation', 'slt', 'sle', 'at4', 'pro', 'limited',
+    'laramie', 'big', 'horn', 'tradesman', 'rebel', 'trx', 'sport', 'touring',
+    'ex', 'lx', 'se', 'sel', 'sv', 'sl', 's', 'xle', 'xse', 'sr', 'sr5', 'trd',
+    'platinum', 'lariat', 'xlt', 'xl', 'king', 'ranch', 'raptor', 'tremor',
+    'wildtrak', 'badlands', 'willys', 'rubicon', 'sahara', 'overland',
+    'summit', 'trailhawk', 'latitude', 'altitude', 'fwd', 'awd', 'rwd', '4wd',
+    '4x4', '4x2', '2wd', 'front', 'rear', 'four', 'all', 'wheel', 'drive',
+    'quad', 'crew', 'double', 'extended', 'regular', 'cab', 'ultimate',
+    'reserve', 'signature', 'premium', 'work', 'truck', 'trail', 'boss',
+    'activ', 'redline', 'midnight', 'north', 'edition', 'hybrid', 'plug-in',
+    'phev', 'ev', 'diesel', 'turbo', 'plus', 'select', 'preferred', 'essence',
+    'avenir', 'st', 'st-line', 'titanium', 'calligraphy', 'ultimate,',
+}
+
+def normalize_model(name):
+    """'2025 Chevrolet Silverado 1500 Rst Four Wheel...' -> 'Chevrolet Silverado 1500'."""
+    s = re.sub(r'^\d{4}\s+', '', str(name)).strip()
+    tokens = s.split()
+    keep = []
+    for i, t in enumerate(tokens):
+        if i >= 1 and t.lower().strip('.,') in TRIM_TOKENS:
+            break
+        keep.append(t)
+    if len(keep) < 2 and len(tokens) >= 2:
+        keep = tokens[:2]
+    return ' '.join(keep) if keep else s
+
+
 def _fig_to_png_bytes(fig, w_in, h_in, tight=True):
     fig.set_size_inches(w_in, h_in)
     buf = io.BytesIO()
@@ -466,12 +498,12 @@ def build_kpi_band_image(metrics):
         for i, (lab, val) in enumerate(kpis):
             x = (i + 0.5) / 4.0
             fig.text(x, 0.72, lab, ha='center', va='center',
-                     color=PREMION_PERIWINKLE, fontsize=8.5, fontweight='bold')
+                     color='white', fontsize=8.5, fontweight='bold')
             fig.text(x, 0.36, val, ha='center', va='center',
                      color='white', fontsize=21, fontweight='bold')
         fig.text(3.5 / 4.0, 0.10,
                  f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
-                 ha='center', va='center', color='#C9D2F5', fontsize=8)
+                 ha='center', va='center', color='#DDE3F8', fontsize=8)
         import matplotlib.lines as mlines
         for i in (1, 2, 3):
             fig.add_artist(mlines.Line2D([i / 4.0, i / 4.0], [0.18, 0.84],
@@ -597,7 +629,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
 
     def _model_counts(frame, count_label):
         f = frame.copy()
-        f['Model_Only'] = f['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+        f['Model_Only'] = f['Vehicle Name'].apply(normalize_model)
         counts = f['Model_Only'].value_counts().reset_index()
         counts.columns = ['Make/Model', count_label]
         return counts[counts[count_label] > 1].head(10)
@@ -647,22 +679,34 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                  card_w, Inches(0.4),
                  f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
                  11, GREY, align=PP_ALIGN.CENTER)
+    add_text(s1, Inches(0.5), Inches(5.6), Inches(12.3), Inches(0.5),
+             "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion "
+             "velocity of the inventory we advertised.", 12, GREY, italic=True,
+             align=PP_ALIGN.CENTER)
     add_footer(s1)
 
-    # --- Slide 2: charts ---
-    s2 = new_slide("Attribution Summary")
+    # --- Slide 2: Traffic Mix (full-size) ---
     if chart_images.get('traffic'):
-        add_picture_fit(s2, chart_images['traffic'], 0.4, 1.7, 7.0, 4.4)
-    if chart_images.get('salesmix'):
-        add_picture_fit(s2, chart_images['salesmix'], 7.65, 2.1, 2.7, 2.7)
-    if chart_images.get('tiers'):
-        add_picture_fit(s2, chart_images['tiers'], 10.5, 2.1, 2.7, 2.7)
-    add_text(s2, Inches(0.5), Inches(6.2), Inches(6.9), Inches(0.6),
-             "VDP visits are high-intent inventory shoppers - the audience most "
-             "likely to buy.", 11, GREY, italic=True)
-    add_text(s2, Inches(7.6), Inches(6.2), Inches(5.3), Inches(0.6),
-             "Look-to-Book = Sold VDPs / Active VDPs: the conversion velocity of "
-             "the inventory we advertised.", 11, GREY, italic=True)
+        s2 = new_slide("Traffic Mix: Where the Audience Shopped")
+        add_picture_fit(s2, chart_images['traffic'], 1.5, 1.5, 10.3, 4.9)
+        add_text(s2, Inches(0.5), Inches(6.45), Inches(12.3), Inches(0.5),
+                 "VDP visits are high-intent inventory shoppers - the audience "
+                 "most likely to buy.", 12, GREY, italic=True,
+                 align=PP_ALIGN.CENTER)
+
+    # --- Slide 3: Sales Mix & Sold Value Tiers ---
+    if chart_images.get('salesmix') or chart_images.get('tiers'):
+        s2b = new_slide("What Sold: Sales Mix & Value Tiers")
+        if chart_images.get('salesmix') and chart_images.get('tiers'):
+            add_picture_fit(s2b, chart_images['salesmix'], 1.55, 1.55, 4.6, 4.6)
+            add_picture_fit(s2b, chart_images['tiers'], 7.2, 1.55, 4.6, 4.6)
+        else:
+            only = chart_images.get('salesmix') or chart_images.get('tiers')
+            add_picture_fit(s2b, only, 4.35, 1.55, 4.6, 4.6)
+        add_text(s2b, Inches(0.5), Inches(6.45), Inches(12.3), Inches(0.5),
+                 "The mix of inventory our traffic helped move - what sold, and "
+                 "at what price points.", 12, GREY, italic=True,
+                 align=PP_ALIGN.CENTER)
 
     # --- Slide 3: Top Sold ---
     if sold_df is not None and not sold_df.empty:
@@ -809,6 +853,17 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         for k, v in reps.items(): text = text.replace(k, v)
         return text.encode('latin-1', 'ignore').decode('latin-1')
 
+    # HELPER: navy header row for tables (sleeker look, matches the KPI band)
+    def thead(cols, size=9):
+        pdf.set_font("Arial", "B", size)
+        pdf.set_fill_color(10, 31, 92)
+        pdf.set_text_color(255, 255, 255)
+        for w, t in cols:
+            pdf.cell(w, 8, t, border=1, fill=True)
+        pdf.ln()
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_fill_color(240, 240, 240)
+
     pdf = FPDF()
     pdf.add_page()
     
@@ -869,15 +924,8 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.cell(0, 10, " 2. Auto Group / Tier 2 Breakdown", ln=True, fill=True)
         pdf.ln(5)
         
-        pdf.set_font("Arial", "B", 9)
-        pdf.cell(50, 8, "Dealer Name", border=1)
-        pdf.cell(18, 8, "Traffic", border=1)
-        pdf.cell(15, 8, "VDPs", border=1)
-        pdf.cell(15, 8, "Sold", border=1)
-        pdf.cell(15, 8, "LTB", border=1)
-        pdf.cell(35, 8, "Est. Rev Sold", border=1)
-        pdf.cell(35, 8, "Pipeline Value", border=1)
-        pdf.ln()
+        thead([(50, "Dealer Name"), (18, "Traffic"), (15, "VDPs"), (15, "Sold"),
+               (15, "LTB"), (35, "Est. Rev Sold"), (35, "Pipeline Value")])
         
         pdf.set_font("Arial", "", 8)
         for _, row in dealer_group.head(15).iterrows():
@@ -962,10 +1010,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, "Traffic Mix (Unique Visits by Page Type)", ln=True)
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(100, 8, "Page Category", border=1)
-    pdf.cell(40, 8, "Unique Visits", border=1)
-    pdf.ln()
+    thead([(100, "Page Category"), (40, "Unique Visits")])
     pdf.set_font("Arial", "", 9)
     traffic_mix = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
     for _, row in traffic_mix.iterrows():
@@ -977,11 +1022,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Sales Mix (New vs Used)", ln=True)
-        pdf.set_font("Arial", "B", 9)
-        pdf.cell(70, 8, "Type", border=1)
-        pdf.cell(35, 8, "Sold Count", border=1)
-        pdf.cell(35, 8, "Share %", border=1)
-        pdf.ln()
+        thead([(70, "Type"), (35, "Sold Count"), (35, "Share %")])
         pdf.set_font("Arial", "", 9)
         sales_mix = sold_df['Type'].value_counts(normalize=True).mul(100).round(1).reset_index()
         sales_mix.columns = ['Type', 'Share']
@@ -998,11 +1039,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     if not sold_df.empty:
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 8, "Price Tiers (Sold Units)", ln=True)
-        pdf.set_font("Arial", "B", 9)
-        pdf.cell(70, 8, "Price Tier", border=1)
-        pdf.cell(35, 8, "Sold Count", border=1)
-        pdf.cell(35, 8, "Share %", border=1)
-        pdf.ln()
+        thead([(70, "Price Tier"), (35, "Sold Count"), (35, "Share %")])
         pdf.set_font("Arial", "", 9)
         tier_mix = sold_df['Price Tier'].value_counts(normalize=True).mul(100).round(1).reset_index()
         tier_mix.columns = ['Price Tier', 'Share']
@@ -1018,7 +1055,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     if not sold_df.empty:
         sold_models = sold_df.copy()
-        sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+        sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(normalize_model)
         model_counts = sold_models['Model_Only'].value_counts().reset_index()
         model_counts.columns = ['Make/Model', 'Units Sold']
         top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
@@ -1028,10 +1065,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             pdf.set_font("Arial", "B", 14)
             pdf.cell(0, 10, f" {sec_models}. Top Sold Models (Aggregated > 1 Unit)", ln=True, fill=True)
             pdf.ln(5)
-            pdf.set_font("Arial", "B", 10)
-            pdf.cell(100, 8, "Make/Model", border=1)
-            pdf.cell(40, 8, "Units Sold", border=1)
-            pdf.ln()
+            thead([(100, "Make/Model"), (40, "Units Sold")], size=10)
             pdf.set_font("Arial", "", 9)
             for _, row in top_models.iterrows():
                 pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
@@ -1041,12 +1075,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(80, 8, "Vehicle Name", border=1)
-    pdf.cell(25, 8, "Type", border=1)
-    pdf.cell(20, 8, "Visitors", border=1)
-    pdf.cell(65, 8, "VIN", border=1)
-    pdf.ln()
+    thead([(80, "Vehicle Name"), (25, "Type"), (20, "Visitors"), (65, "VIN")], size=10)
 
     if not sold_df.empty:
         top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
@@ -1072,7 +1101,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         
         if not missed_df.empty:
             missed_models = missed_df.copy()
-            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(normalize_model)
             missed_counts = missed_models['Model_Only'].value_counts().reset_index()
             missed_counts.columns = ['Make/Model', 'Count']
             top_missed = missed_counts[missed_counts['Count'] > 1].head(10)
@@ -1080,10 +1109,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             if not top_missed.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Top Missed Models (Aggregated > 1 Unit)", ln=True)
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(100, 8, "Make/Model", border=1)
-                pdf.cell(40, 8, "Missed Count", border=1)
-                pdf.ln()
+                thead([(100, "Make/Model"), (40, "Missed Count")], size=10)
                 pdf.set_font("Arial", "", 9)
                 for _, row in top_missed.iterrows():
                     pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
@@ -1093,12 +1119,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         
         pdf.set_font("Arial", "B", 11)
         pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
-        pdf.set_font("Arial", "B", 10)
-        pdf.cell(85, 8, "Vehicle Name (Clickable)", border=1)
-        pdf.cell(65, 8, "VIN", border=1)
-        pdf.cell(20, 8, "Type", border=1)
-        pdf.cell(20, 8, "Visitors", border=1)
-        pdf.ln()
+        thead([(85, "Vehicle Name (Clickable)"), (65, "VIN"), (20, "Type"), (20, "Visitors")], size=10)
         pdf.set_font("Arial", "", 9)
         if not missed_df.empty:
              top_missed_detail = missed_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
@@ -1132,7 +1153,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             
             if not dealer_sold.empty:
                 d_sold_models = dealer_sold.copy()
-                d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(normalize_model)
                 d_model_counts = d_sold_models['Model_Only'].value_counts().reset_index()
                 d_model_counts.columns = ['Make/Model', 'Units Sold']
                 d_top_models = d_model_counts[d_model_counts['Units Sold'] > 1].head(5)
@@ -1140,10 +1161,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 if not d_top_models.empty:
                     pdf.set_font("Arial", "B", 11)
                     pdf.cell(0, 10, "Top Sold Models", ln=True)
-                    pdf.set_font("Arial", "B", 10)
-                    pdf.cell(100, 8, "Make/Model", border=1)
-                    pdf.cell(40, 8, "Units Sold", border=1)
-                    pdf.ln()
+                    thead([(100, "Make/Model"), (40, "Units Sold")], size=10)
                     pdf.set_font("Arial", "", 9)
                     for _, row in d_top_models.iterrows():
                         pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
@@ -1153,7 +1171,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                     
             if not dealer_missed.empty:
                 d_missed_models = dealer_missed.copy()
-                d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(normalize_model)
                 d_missed_counts = d_missed_models['Model_Only'].value_counts().reset_index()
                 d_missed_counts.columns = ['Make/Model', 'Count']
                 d_top_missed = d_missed_counts[d_missed_counts['Count'] > 1].head(5)
@@ -1161,10 +1179,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 if not d_top_missed.empty:
                     pdf.set_font("Arial", "B", 11)
                     pdf.cell(0, 10, "Top Missed Models", ln=True)
-                    pdf.set_font("Arial", "B", 10)
-                    pdf.cell(100, 8, "Make/Model", border=1)
-                    pdf.cell(40, 8, "Missed Count", border=1)
-                    pdf.ln()
+                    thead([(100, "Make/Model"), (40, "Missed Count")], size=10)
                     pdf.set_font("Arial", "", 9)
                     for _, row in d_top_missed.iterrows():
                         pdf.cell(100, 8, safe_str(row['Make/Model']), border=1)
@@ -1175,12 +1190,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             if not dealer_sold.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Top Sold Units (Detail)", ln=True)
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(80, 8, "Vehicle Name", border=1)
-                pdf.cell(25, 8, "Type", border=1)
-                pdf.cell(20, 8, "Visitors", border=1)
-                pdf.cell(65, 8, "VIN", border=1)
-                pdf.ln()
+                thead([(80, "Vehicle Name"), (25, "Type"), (20, "Visitors"), (65, "VIN")], size=10)
                 d_top_sold = dealer_sold.sort_values('Attributed Unique Visitors', ascending=False).head(10)
                 for _, row in d_top_sold.iterrows():
                     name = safe_str(row['Vehicle Name'])[:35]
@@ -1196,12 +1206,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             if not dealer_missed.empty:
                 pdf.set_font("Arial", "B", 11)
                 pdf.cell(0, 10, "Missed Opportunities (Detail)", ln=True)
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(85, 8, "Vehicle Name (Clickable)", border=1)
-                pdf.cell(65, 8, "VIN", border=1)
-                pdf.cell(20, 8, "Type", border=1)
-                pdf.cell(20, 8, "Visitors", border=1)
-                pdf.ln()
+                thead([(85, "Vehicle Name (Clickable)"), (65, "VIN"), (20, "Type"), (20, "Visitors")], size=10)
                 d_top_missed_detail = dealer_missed.sort_values('Attributed Unique Visitors', ascending=False).head(10)
                 pdf.set_font("Arial", "", 9)
                 for _, row in d_top_missed_detail.iterrows():
@@ -2563,7 +2568,7 @@ if st.session_state.current_report_id is not None:
     with t1:
         if not sold_df.empty:
             sold_models = sold_df.copy()
-            sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(normalize_model)
             model_counts = sold_models['Model_Only'].value_counts().reset_index()
             model_counts.columns = ['Make/Model', 'Units Sold']
             top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
@@ -2576,7 +2581,7 @@ if st.session_state.current_report_id is not None:
     with t2:
         if not missed_df.empty:
             missed_models = missed_df.copy()
-            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(normalize_model)
             missed_counts = missed_models['Model_Only'].value_counts().reset_index()
             missed_counts.columns = ['Make/Model', 'Missed Count']
             top_missed = missed_counts[missed_counts['Missed Count'] > 1].head(10)
@@ -2626,7 +2631,7 @@ if st.session_state.current_report_id is not None:
                     with c_left:
                         if not d_sold.empty:
                             d_sold_models = d_sold.copy()
-                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(normalize_model)
                             d_m_counts = d_sold_models['Model_Only'].value_counts().reset_index()
                             d_m_counts.columns = ['Make/Model', 'Units Sold']
                             st.markdown("**🏆 Top Sold Models**")
@@ -2634,7 +2639,7 @@ if st.session_state.current_report_id is not None:
                     with c_right:
                         if not d_missed.empty:
                             d_missed_models = d_missed.copy()
-                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(normalize_model)
                             d_m_counts = d_missed_models['Model_Only'].value_counts().reset_index()
                             d_m_counts.columns = ['Make/Model', 'Missed Count']
                             st.markdown("**⚠️ Top Missed Models**")
