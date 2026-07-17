@@ -359,14 +359,41 @@ PREMION_BLUE = "#2E6FB7"
 PREMION_GREEN = "#5FBFA0"
 PREMION_RED = "#C0504D"
 
-def _fig_to_png_bytes(fig, w_in, h_in):
+def _fig_to_png_bytes(fig, w_in, h_in, tight=True):
     fig.set_size_inches(w_in, h_in)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                facecolor="white", edgecolor="none")
+    fig.savefig(buf, format="png", dpi=150,
+                bbox_inches=("tight" if tight else None),
+                facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close(fig)
     buf.seek(0)
     return buf
+
+def _donut_chart(values, labels, colors, title, center_top, center_sub):
+    """
+    Fixed-geometry donut: the axes box is pinned so every donut renders the
+    same circle size regardless of label/legend length (saved with tight=False).
+    """
+    fig, ax = plt.subplots(figsize=(4.0, 4.0))
+    fig.patch.set_facecolor("white")
+    ax.set_position([0.06, 0.20, 0.88, 0.66])
+    total = sum(values)
+    wedges, _texts, autotexts = ax.pie(
+        values, colors=colors, startangle=90, counterclock=False,
+        autopct=lambda p: f"{p:.0f}%" if p >= 5 else "",
+        pctdistance=0.78,
+        wedgeprops={'width': 0.42, 'edgecolor': 'white', 'linewidth': 2},
+        textprops={'color': 'white', 'fontweight': 'bold', 'fontsize': 9})
+    ax.text(0, 0.10, center_top, ha='center', va='center',
+            fontsize=22, fontweight='bold', color=PREMION_NAVY)
+    ax.text(0, -0.24, center_sub, ha='center', va='center',
+            fontsize=9, color='#6B7280')
+    fig.suptitle(title, y=0.965, fontweight='bold', color=PREMION_NAVY, fontsize=13)
+    safe_labels = [str(l).replace('$', r'\$') for l in labels]  # avoid mathtext
+    fig.legend(wedges, [f"{l}  ({v})" for l, v in zip(safe_labels, values)],
+               loc='lower center', bbox_to_anchor=(0.5, 0.015),
+               ncol=2, frameon=False, fontsize=8.5)
+    return _fig_to_png_bytes(fig, 4.0, 4.0, tight=False)
 
 def build_summary_chart_images(df, sold_df):
     """
@@ -377,58 +404,111 @@ def build_summary_chart_images(df, sold_df):
     images = {}
     try:
         traffic = (df.groupby('Category')['Attributed Unique Visitors'].sum()
-                     .reset_index().sort_values('Attributed Unique Visitors', ascending=False))
+                     .reset_index().sort_values('Attributed Unique Visitors', ascending=True))
         fig, ax = plt.subplots()
-        ax.bar(traffic['Category'], traffic['Attributed Unique Visitors'], color=PREMION_BLUE)
-        ax.set_ylabel("Unique Visits"); ax.set_title("Traffic Mix", fontweight="bold", color=PREMION_NAVY)
-        ax.tick_params(axis='x', rotation=45)
-        for lbl in ax.get_xticklabels(): lbl.set_ha('right'); lbl.set_fontsize(8)
-        for s in ('top', 'right'): ax.spines[s].set_visible(False)
-        images['traffic'] = _fig_to_png_bytes(fig, 5.2, 3.4)
+        fig.patch.set_facecolor("white")
+        colors = [PREMION_BLUE] * len(traffic)
+        if colors:
+            colors[-1] = PREMION_NAVY  # spotlight the top category
+        bars = ax.barh(traffic['Category'], traffic['Attributed Unique Visitors'],
+                       color=colors, height=0.62)
+        ax.bar_label(bars, padding=4, fontsize=9, fontweight='bold', color=PREMION_NAVY)
+        ax.set_title("Traffic Mix (Unique Visits by Page Type)", loc='left',
+                     fontweight='bold', color=PREMION_NAVY, fontsize=13)
+        ax.tick_params(axis='y', labelsize=9)
+        ax.set_xticks([])
+        for s in ('top', 'right', 'bottom'):
+            ax.spines[s].set_visible(False)
+        ax.spines['left'].set_color('#D1D5DB')
+        max_v = traffic['Attributed Unique Visitors'].max()
+        if pd.notna(max_v) and max_v > 0:
+            ax.set_xlim(0, max_v * 1.15)
+        ax.margins(y=0.02)
+        images['traffic'] = _fig_to_png_bytes(fig, 6.6, 3.7)
     except Exception:
         pass
     if sold_df is not None and not sold_df.empty:
         try:
             tc = sold_df['Type'].value_counts()
-            fig, ax = plt.subplots()
             cmap = {'New': PREMION_BLUE, 'Used': PREMION_RED}
-            ax.pie(tc.values, labels=tc.index, autopct='%1.1f%%', startangle=90,
-                   colors=[cmap.get(t, PREMION_PERIWINKLE) for t in tc.index],
-                   textprops={'color': 'white', 'fontweight': 'bold'})
-            ax.set_title("Sales Mix (New vs Used)", fontweight="bold", color=PREMION_NAVY)
-            images['salesmix'] = _fig_to_png_bytes(fig, 4.2, 3.6)
+            images['salesmix'] = _donut_chart(
+                tc.values.tolist(), tc.index.tolist(),
+                [cmap.get(t, PREMION_PERIWINKLE) for t in tc.index],
+                "Sales Mix (New vs Used)", str(int(tc.sum())), "Sold")
         except Exception:
             pass
         try:
             tier = sold_df['Price Tier'].value_counts()
             palette = [PREMION_GREEN, PREMION_ORANGE, PREMION_PERIWINKLE, PREMION_BLUE, PREMION_RED]
-            fig, ax = plt.subplots()
-            ax.pie(tier.values, labels=tier.index, autopct='%1.1f%%', startangle=90,
-                   colors=palette[:len(tier)],
-                   textprops={'color': 'white', 'fontweight': 'bold', 'fontsize': 8})
-            ax.set_title("Sold Value Tiers", fontweight="bold", color=PREMION_NAVY)
-            images['tiers'] = _fig_to_png_bytes(fig, 4.2, 3.6)
+            images['tiers'] = _donut_chart(
+                tier.values.tolist(), tier.index.tolist(),
+                palette[:len(tier)],
+                "Sold Value Tiers", str(int(tier.sum())), "Sold")
         except Exception:
             pass
     return images
 
-def build_pptx_report(df, sold_df, metrics, chart_images, report_title):
+def build_kpi_band_image(metrics):
     """
-    Build a Premion-styled PowerPoint: a title/KPI slide plus a charts slide,
-    matching the look of the attribution deck (navy band, KPI cards). Returns
-    PPTX file bytes, or None if python-pptx isn't available.
+    Render the Executive Summary top-line as a navy dashboard-style KPI band
+    (PNG bytes) for the PDF. Returns None on any failure so the PDF can fall
+    back to plain text.
+    """
+    try:
+        fig = plt.figure(figsize=(10.6, 1.6))
+        fig.patch.set_facecolor(PREMION_NAVY)
+        kpis = [
+            ("UNITS SOLD (ATTRIBUTED)", str(metrics.get('units_sold', 0))),
+            ("EST. REVENUE SOLD", f"${float(metrics.get('rev_sold', 0)):,.0f}"),
+            ("TOTAL PIPELINE VALUE", f"${float(metrics.get('pipeline', 0)):,.0f}"),
+            ("LOOK-TO-BOOK RATIO", f"{metrics.get('ltb', 0)}%"),
+        ]
+        for i, (lab, val) in enumerate(kpis):
+            x = (i + 0.5) / 4.0
+            fig.text(x, 0.72, lab, ha='center', va='center',
+                     color=PREMION_PERIWINKLE, fontsize=8.5, fontweight='bold')
+            fig.text(x, 0.36, val, ha='center', va='center',
+                     color='white', fontsize=21, fontweight='bold')
+        fig.text(3.5 / 4.0, 0.10,
+                 f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
+                 ha='center', va='center', color='#C9D2F5', fontsize=8)
+        import matplotlib.lines as mlines
+        for i in (1, 2, 3):
+            fig.add_artist(mlines.Line2D([i / 4.0, i / 4.0], [0.18, 0.84],
+                                         transform=fig.transFigure,
+                                         color=PREMION_PERIWINKLE, alpha=0.35, lw=1))
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, facecolor=PREMION_NAVY)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
+                      missed_df=None, dealer_group=None,
+                      include_dealer_details=False, include_missed=True):
+    """
+    Build the full Premion-styled PowerPoint deck: Executive Summary, charts,
+    Top Sold, Missed Opportunities (Watch List), Auto Group scoreboard +
+    per-dealer deep dives for multi-dealer reports, and Glossary/Methodology.
+    Returns PPTX file bytes, or None if python-pptx isn't available.
     """
     try:
         from pptx import Presentation
         from pptx.util import Inches, Pt
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+        from pptx.enum.shapes import MSO_SHAPE
     except Exception:
         return None
 
     NAVY = RGBColor(0x0A, 0x1F, 0x5C)
     PERI = RGBColor(0x85, 0x93, 0xE8)
     WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    DARK = RGBColor(0x33, 0x33, 0x33)
+    GREY = RGBColor(0x6B, 0x72, 0x80)
+    LIGHT = RGBColor(0xEF, 0xF1, 0xFA)
 
     prs = Presentation()
     prs.slide_width = Inches(13.333)   # 16:9
@@ -436,39 +516,125 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title):
     blank = prs.slide_layouts[6]
 
     def add_text(slide, left, top, width, height, text, size, color,
-                 bold=False, align=PP_ALIGN.LEFT):
+                 bold=False, align=PP_ALIGN.LEFT, italic=False):
         tb = slide.shapes.add_textbox(left, top, width, height)
         tf = tb.text_frame; tf.word_wrap = True
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0]; p.alignment = align
         r = p.add_run(); r.text = text
         r.font.size = Pt(size); r.font.bold = bold; r.font.color.rgb = color
+        r.font.italic = italic
         r.font.name = "Arial"
         return tb
 
-    def fill_rect(slide, left, top, width, height, color):
-        from pptx.enum.shapes import MSO_SHAPE
-        shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    def fill_rect(slide, left, top, width, height, color, rounded=True):
+        shape_type = MSO_SHAPE.ROUNDED_RECTANGLE if rounded else MSO_SHAPE.RECTANGLE
+        shp = slide.shapes.add_shape(shape_type, left, top, width, height)
         shp.fill.solid(); shp.fill.fore_color.rgb = color
         shp.line.fill.background()
         return shp
 
+    def add_footer(slide):
+        add_text(slide, Inches(0.5), Inches(7.02), Inches(6), Inches(0.35),
+                 "TEGNA  |  PREMION", 12, NAVY, bold=True)
+
+    def new_slide(title, band_h=1.1):
+        s = prs.slides.add_slide(blank)
+        fill_rect(s, Inches(0), Inches(0), prs.slide_width, Inches(band_h), NAVY,
+                  rounded=False)
+        add_text(s, Inches(0.5), Inches(0.2), Inches(12.3), Inches(0.7),
+                 title, 26, PERI, bold=True)
+        add_footer(s)
+        return s
+
+    def add_table(slide, left, top, width, rows_data, col_fracs, font_size=10,
+                  row_h_in=0.32):
+        if not rows_data:
+            return None
+        n_rows = len(rows_data); n_cols = len(rows_data[0])
+        gfx = slide.shapes.add_table(n_rows, n_cols, left, top, width,
+                                     Inches(row_h_in * n_rows))
+        table = gfx.table
+        total = float(sum(col_fracs))
+        for j, frac in enumerate(col_fracs):
+            table.columns[j].width = int(width * (frac / total))
+        for i, row in enumerate(rows_data):
+            for j, val in enumerate(row):
+                cell = table.cell(i, j)
+                cell.margin_left = Pt(4); cell.margin_right = Pt(4)
+                cell.margin_top = Pt(1); cell.margin_bottom = Pt(1)
+                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+                tf = cell.text_frame; tf.word_wrap = False
+                p = tf.paragraphs[0]
+                r = p.add_run(); r.text = str(val)
+                r.font.name = "Arial"; r.font.size = Pt(font_size)
+                if i == 0:
+                    r.font.bold = True; r.font.color.rgb = WHITE
+                    cell.fill.solid(); cell.fill.fore_color.rgb = NAVY
+                else:
+                    r.font.color.rgb = DARK
+                    cell.fill.solid()
+                    cell.fill.fore_color.rgb = LIGHT if i % 2 == 0 else WHITE
+        return gfx
+
+    def add_picture_fit(slide, buf, left, top, max_w_in, max_h_in):
+        """Place an image inside a bounding box, preserving aspect ratio."""
+        try:
+            from PIL import Image as PILImage
+            buf.seek(0)
+            with PILImage.open(buf) as im:
+                aspect = im.width / im.height
+        except Exception:
+            aspect = 1.0
+        buf.seek(0)
+        w = max_w_in; h = w / aspect
+        if h > max_h_in:
+            h = max_h_in; w = h * aspect
+        pic = slide.shapes.add_picture(buf, Inches(left), Inches(top),
+                                       width=Inches(w))
+        buf.seek(0)
+        return pic
+
+    def _model_counts(frame, count_label):
+        f = frame.copy()
+        f['Model_Only'] = f['Vehicle Name'].apply(lambda x: re.sub(r'^\d{4}\s+', '', str(x)))
+        counts = f['Model_Only'].value_counts().reset_index()
+        counts.columns = ['Make/Model', count_label]
+        return counts[counts[count_label] > 1].head(10)
+
+    def _fmt_money(v):
+        try:
+            return f"${float(v):,.0f}"
+        except Exception:
+            return str(v)
+
+    missed_df = missed_df if missed_df is not None else pd.DataFrame()
+    has_missed = include_missed and not missed_df.empty
+    has_group = dealer_group is not None and not dealer_group.empty
+
     # --- Slide 1: title band + KPI cards ---
     s1 = prs.slides.add_slide(blank)
-    band = fill_rect(s1, Inches(0), Inches(0), prs.slide_width, Inches(1.6), NAVY)
-    add_text(s1, Inches(0.5), Inches(0.15), Inches(12), Inches(0.8),
+    fill_rect(s1, Inches(0), Inches(0), prs.slide_width, Inches(1.6), NAVY,
+              rounded=False)
+    add_text(s1, Inches(0.5), Inches(0.15), Inches(12.3), Inches(0.8),
              "Premion Website Attribution", 34, PERI, bold=True)
-    add_text(s1, Inches(0.5), Inches(0.9), Inches(12), Inches(0.5),
-             report_title, 18, WHITE, bold=True)
+    add_text(s1, Inches(0.5), Inches(0.9), Inches(12.3), Inches(0.5),
+             f"Inventory Impact Report  |  {report_title}", 18, WHITE, bold=True)
+    add_text(s1, Inches(0.5), Inches(1.75), Inches(12.3), Inches(0.5),
+             "Complementary to your website attribution: the vehicles our audience "
+             "shopped that have since moved off the lot.", 13, GREY, italic=True)
 
-    kpis = [("Units Sold (Attributed)", str(metrics.get('units', 0))),
-            ("Est. Revenue Sold", f"${metrics.get('revenue', 0):,.0f}"),
-            ("Total Pipeline Value", f"${metrics.get('pipeline', 0):,.0f}"),
-            ("Look-to-Book Ratio", f"{metrics.get('ltb', 0):.1f}%")]
+    units_val = metrics.get('units_sold', metrics.get('units', 0))
+    rev_val = metrics.get('rev_sold', metrics.get('revenue', 0))
+    ltb_val = metrics.get('ltb', 0)
+    kpis = [("Units Sold (Attributed)", str(units_val)),
+            ("Est. Revenue Sold", _fmt_money(rev_val)),
+            ("Total Pipeline Value", _fmt_money(metrics.get('pipeline', 0))),
+            ("Look-to-Book Ratio", f"{ltb_val}%")]
     card_w = Inches(2.9); card_h = Inches(1.9); gap = Inches(0.28)
     total_w = card_w * 4 + gap * 3
     x0 = (prs.slide_width - total_w) / 2
-    y0 = Inches(2.5)
+    y0 = Inches(2.7)
     for i, (label, val) in enumerate(kpis):
         cx = x0 + i * (card_w + gap)
         fill_rect(s1, cx, y0, card_w, card_h, NAVY)
@@ -476,25 +642,158 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title):
                  align=PP_ALIGN.CENTER)
         add_text(s1, cx, y0 + Inches(0.8), card_w, Inches(0.9), val, 30, WHITE,
                  bold=True, align=PP_ALIGN.CENTER)
-    add_text(s1, Inches(0.5), Inches(6.9), Inches(6), Inches(0.4),
-             "TEGNA  |  PREMION", 12, NAVY, bold=True)
+    if metrics.get('new_ltb') is not None or metrics.get('used_ltb') is not None:
+        add_text(s1, x0 + 3 * (card_w + gap), y0 + card_h + Inches(0.08),
+                 card_w, Inches(0.4),
+                 f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
+                 11, GREY, align=PP_ALIGN.CENTER)
+    add_footer(s1)
 
     # --- Slide 2: charts ---
-    s2 = prs.slides.add_slide(blank)
-    fill_rect(s2, Inches(0), Inches(0), prs.slide_width, Inches(1.1), NAVY)
-    add_text(s2, Inches(0.5), Inches(0.2), Inches(12), Inches(0.7),
-             "Attribution Summary", 26, PERI, bold=True)
+    s2 = new_slide("Attribution Summary")
     if chart_images.get('traffic'):
-        s2.shapes.add_picture(chart_images['traffic'], Inches(0.4), Inches(1.5), height=Inches(3.6))
-        chart_images['traffic'].seek(0)
+        add_picture_fit(s2, chart_images['traffic'], 0.4, 1.7, 7.0, 4.4)
     if chart_images.get('salesmix'):
-        s2.shapes.add_picture(chart_images['salesmix'], Inches(6.4), Inches(1.4), height=Inches(2.9))
-        chart_images['salesmix'].seek(0)
+        add_picture_fit(s2, chart_images['salesmix'], 7.65, 2.1, 2.7, 2.7)
     if chart_images.get('tiers'):
-        s2.shapes.add_picture(chart_images['tiers'], Inches(9.6), Inches(1.4), height=Inches(2.9))
-        chart_images['tiers'].seek(0)
-    add_text(s2, Inches(0.5), Inches(6.9), Inches(6), Inches(0.4),
-             "TEGNA  |  PREMION", 12, NAVY, bold=True)
+        add_picture_fit(s2, chart_images['tiers'], 10.5, 2.1, 2.7, 2.7)
+    add_text(s2, Inches(0.5), Inches(6.2), Inches(6.9), Inches(0.6),
+             "VDP visits are high-intent inventory shoppers - the audience most "
+             "likely to buy.", 11, GREY, italic=True)
+    add_text(s2, Inches(7.6), Inches(6.2), Inches(5.3), Inches(0.6),
+             "Look-to-Book = Sold VDPs / Active VDPs: the conversion velocity of "
+             "the inventory we advertised.", 11, GREY, italic=True)
+
+    # --- Slide 3: Top Sold ---
+    if sold_df is not None and not sold_df.empty:
+        s3 = new_slide("Top Sold: Proof of Inventory Movement")
+        top_models = _model_counts(sold_df, 'Units Sold')
+        if not top_models.empty:
+            add_text(s3, Inches(0.5), Inches(1.35), Inches(4.6), Inches(0.4),
+                     "Top Sold Models (>1 Unit)", 14, NAVY, bold=True)
+            rows = [["Make/Model", "Units"]] + [
+                [str(r['Make/Model'])[:30], str(r['Units Sold'])]
+                for _, r in top_models.iterrows()]
+            add_table(s3, Inches(0.5), Inches(1.8), Inches(4.4), rows,
+                      [4, 1], font_size=10)
+        detail_x = 5.3 if not top_models.empty else 0.5
+        detail_w = 7.5 if not top_models.empty else 12.3
+        add_text(s3, Inches(detail_x), Inches(1.35), Inches(detail_w), Inches(0.4),
+                 "Top Sold Units (Detail)", 14, NAVY, bold=True)
+        top_sold = sold_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        rows = [["Vehicle", "Type", "Visitors", "VIN"]] + [
+            [str(r['Vehicle Name'])[:34], str(r['Type']),
+             str(r['Attributed Unique Visitors']), str(r['VIN'])]
+            for _, r in top_sold.iterrows()]
+        add_table(s3, Inches(detail_x), Inches(1.8), Inches(detail_w), rows,
+                  [3.4, 0.9, 1.0, 2.4], font_size=9)
+
+    # --- Slide 4: Missed Opportunities ---
+    if has_missed:
+        s4 = new_slide("Missed Opportunities: The Watch List")
+        add_text(s4, Inches(0.5), Inches(1.3), Inches(12.3), Inches(0.6),
+                 "Active vehicles receiving above-average campaign traffic that "
+                 "haven't sold yet - review these VDPs for missing photos, "
+                 "\"Call for Price\" buttons, or pricing outliers.", 12, GREY,
+                 italic=True)
+        top_missed = missed_df.sort_values('Attributed Unique Visitors', ascending=False).head(10)
+        rows = [["Vehicle", "Type", "Visitors", "VIN"]] + [
+            [str(r['Vehicle Name'])[:40], str(r['Type']),
+             str(r['Attributed Unique Visitors']), str(r['VIN'])]
+            for _, r in top_missed.iterrows()]
+        add_table(s4, Inches(0.5), Inches(2.0), Inches(12.3), rows,
+                  [4.2, 0.9, 1.0, 2.4], font_size=10)
+
+    # --- Auto Group scoreboard (multi-dealer) ---
+    if has_group:
+        group_rows = dealer_group.reset_index(drop=True)
+        per_slide = 12
+        n_pages = (len(group_rows) + per_slide - 1) // per_slide
+        for page in range(n_pages):
+            title = "Auto Group Scoreboard"
+            if n_pages > 1:
+                title += f" ({page + 1} of {n_pages})"
+            sg = new_slide(title)
+            chunk = group_rows.iloc[page * per_slide:(page + 1) * per_slide]
+            rows = [["Dealer", "Traffic", "VDPs", "Sold", "LTB", "Est. Rev Sold", "Pipeline"]]
+            for _, r in chunk.iterrows():
+                rows.append([str(r['Dealer'])[:32], str(r['Total Visitors']),
+                             str(r['VDPs Shopped']), str(r['Units Sold']),
+                             f"{r['Look-to-Book (%)']}%",
+                             _fmt_money(r['Est. Rev Sold']),
+                             _fmt_money(r['Pipeline Value'])])
+            add_table(sg, Inches(0.5), Inches(1.5), Inches(12.3), rows,
+                      [3.4, 1.0, 0.8, 0.8, 0.9, 1.5, 1.5], font_size=10)
+
+    # --- Dealer Deep Dives (one slide per dealer) ---
+    if include_dealer_details and has_group:
+        for _, grow in dealer_group.iterrows():
+            dealer = grow['Dealer']
+            d_sold = sold_df[sold_df['Dealer'] == dealer] if sold_df is not None and not sold_df.empty else pd.DataFrame()
+            d_missed = missed_df[missed_df['Dealer'] == dealer] if not missed_df.empty else pd.DataFrame()
+            if d_sold.empty and d_missed.empty:
+                continue
+            sd = new_slide(f"Dealer Profile: {str(dealer)[:48]}")
+            add_text(sd, Inches(0.5), Inches(1.25), Inches(12.3), Inches(0.4),
+                     f"Traffic: {grow['Total Visitors']}   |   VDPs Shopped: {grow['VDPs Shopped']}   |   "
+                     f"Units Sold: {grow['Units Sold']}   |   LTB: {grow['Look-to-Book (%)']}%   |   "
+                     f"Est. Rev Sold: {_fmt_money(grow['Est. Rev Sold'])}   |   "
+                     f"Pipeline: {_fmt_money(grow['Pipeline Value'])}",
+                     12, NAVY, bold=True)
+            if not d_sold.empty:
+                add_text(sd, Inches(0.5), Inches(1.85), Inches(5.9), Inches(0.4),
+                         "Top Sold Units", 13, NAVY, bold=True)
+                d_top = d_sold.sort_values('Attributed Unique Visitors', ascending=False).head(5)
+                rows = [["Vehicle", "Type", "Visitors"]] + [
+                    [str(r['Vehicle Name'])[:34], str(r['Type']),
+                     str(r['Attributed Unique Visitors'])]
+                    for _, r in d_top.iterrows()]
+                add_table(sd, Inches(0.5), Inches(2.25), Inches(5.9), rows,
+                          [3.6, 0.9, 1.0], font_size=9)
+            if not d_missed.empty:
+                add_text(sd, Inches(6.9), Inches(1.85), Inches(5.9), Inches(0.4),
+                         "Missed Opportunities (Watch List)", 13, NAVY, bold=True)
+                d_topm = d_missed.sort_values('Attributed Unique Visitors', ascending=False).head(5)
+                rows = [["Vehicle", "Type", "Visitors"]] + [
+                    [str(r['Vehicle Name'])[:34], str(r['Type']),
+                     str(r['Attributed Unique Visitors'])]
+                    for _, r in d_topm.iterrows()]
+                add_table(sd, Inches(6.9), Inches(2.25), Inches(5.9), rows,
+                          [3.6, 0.9, 1.0], font_size=9)
+
+    # --- Glossary & Methodology ---
+    sg2 = new_slide("Glossary & Methodology")
+    glossary = [
+        ("Units Sold (Attributed)",
+         "Vehicles removed from the dealer's live inventory after receiving attributed campaign traffic."),
+        ("Est. Revenue Sold / Pipeline Value",
+         "Directional estimates. New: base MSRP for the model. Used: base MSRP depreciated by age "
+         "(15% year 1, 10% each following year). Not exact transaction prices."),
+        ("Look-to-Book Ratio",
+         "Sold VDPs / Total Active VDPs - the conversion velocity of the inventory, split New vs Used."),
+        ("Traffic Mix",
+         "Where audiences navigated on the site: VDPs, Service, Search, Incentives/Offers, Homepage."),
+        ("Missed Opportunities (Watch List)",
+         "Active vehicles with above-average traffic that haven't sold - flags potential pricing or "
+         "merchandising issues."),
+        ("Methodology Note",
+         "Inventory status reflects the dealer's website at the moment this report was run, not a "
+         "historical snapshot."),
+    ]
+    tb = sg2.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(12.1), Inches(5.2))
+    tf = tb.text_frame; tf.word_wrap = True
+    first = True
+    from pptx.util import Pt as _Pt
+    for head, body in glossary:
+        p = tf.paragraphs[0] if first else tf.add_paragraph()
+        first = False
+        r = p.add_run(); r.text = head
+        r.font.name = "Arial"; r.font.size = _Pt(14); r.font.bold = True
+        r.font.color.rgb = NAVY
+        p2 = tf.add_paragraph()
+        r2 = p2.add_run(); r2.text = body
+        r2.font.name = "Arial"; r2.font.size = _Pt(11); r2.font.color.rgb = DARK
+        p2.space_after = _Pt(8)
 
     out = io.BytesIO()
     prs.save(out); out.seek(0)
@@ -531,20 +830,37 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.set_font("Arial", "B", 14)
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " 1. Executive Summary", ln=True, fill=True)
-    pdf.set_font("Arial", "", 12)
-    pdf.ln(5)
-    
-    col_width = pdf.w / 2.2
-    
-    pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
-    pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
-    
-    pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
-    pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
-    
-    pdf.set_font("Arial", "I", 10)
-    pdf.cell(col_width, 6, "", border=0) 
-    pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
+    pdf.ln(4)
+
+    # Navy dashboard-style KPI band; falls back to plain text if imaging fails.
+    band_done = False
+    kpi_band = build_kpi_band_image(metrics)
+    if kpi_band is not None:
+        try:
+            import tempfile
+            tfb = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            tfb.write(kpi_band.read()); tfb.close()
+            pdf.image(tfb.name, x=15, w=180)
+            try: os.remove(tfb.name)
+            except Exception: pass
+            band_done = True
+            pdf.ln(2)
+            pdf.set_font("Arial", "I", 8)
+            pdf.set_text_color(90, 90, 90)
+            pdf.cell(0, 5, "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion velocity of the inventory we advertised.", ln=True, align="C")
+            pdf.set_text_color(0, 0, 0)
+        except Exception:
+            band_done = False
+    if not band_done:
+        pdf.set_font("Arial", "", 12)
+        col_width = pdf.w / 2.2
+        pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
+        pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
+        pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
+        pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
+        pdf.set_font("Arial", "I", 10)
+        pdf.cell(col_width, 6, "", border=0)
+        pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
     pdf.ln(8)
 
     section_offset = 0
@@ -582,9 +898,35 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.ln(5)
 
     # Visual charts (matching the on-screen dashboard) embedded as images.
+    # Heights are computed from the real PNG dimensions and page breaks are
+    # inserted before placing, so charts can never run off the page edge.
     if chart_images:
         try:
             import tempfile
+            try:
+                from PIL import Image as PILImage
+            except Exception:
+                PILImage = None
+
+            def _img_h_mm(path, w_mm):
+                if PILImage is not None:
+                    try:
+                        with PILImage.open(path) as im:
+                            return w_mm * im.height / im.width
+                    except Exception:
+                        pass
+                return w_mm * 0.62  # safe fallback aspect
+
+            def _ensure_space(h_mm):
+                if pdf.get_y() + h_mm > pdf.h - 15:
+                    pdf.add_page()
+
+            def _caption(text):
+                pdf.set_font("Arial", "I", 8)
+                pdf.set_text_color(90, 90, 90)
+                pdf.cell(0, 5, safe_str(text), ln=True, align="C")
+                pdf.set_text_color(0, 0, 0)
+
             saved = {}
             for key in ('traffic', 'salesmix', 'tiers'):
                 if chart_images.get(key):
@@ -594,15 +936,23 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                     saved[key] = tf.name
                     chart_images[key].seek(0)
             if saved.get('traffic'):
+                h = _img_h_mm(saved['traffic'], 180)
+                _ensure_space(h + 8)
                 pdf.image(saved['traffic'], x=15, w=180)
+                _caption("Where our audience navigated on the dealer's site. VDP visits = high-intent inventory shoppers.")
                 pdf.ln(2)
             if saved.get('salesmix') or saved.get('tiers'):
+                h1 = _img_h_mm(saved['salesmix'], 88) if saved.get('salesmix') else 0
+                h2 = _img_h_mm(saved['tiers'], 88) if saved.get('tiers') else 0
+                row_h = max(h1, h2)
+                _ensure_space(row_h + 8)
                 y = pdf.get_y()
                 if saved.get('salesmix'):
                     pdf.image(saved['salesmix'], x=15, y=y, w=88)
                 if saved.get('tiers'):
                     pdf.image(saved['tiers'], x=107, y=y, w=88)
-                pdf.ln(75)
+                pdf.set_y(y + row_h + 1)
+                _caption("What sold, and at what price points - the mix of inventory our traffic helped move.")
             for path in saved.values():
                 try: os.remove(path)
                 except Exception: pass
@@ -867,6 +1217,33 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                      pdf.cell(20, 8, str(row['Attributed Unique Visitors']), border=1)
                      pdf.ln()
                  
+    # --- GLOSSARY & METHODOLOGY ---
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(0, 10, " Glossary & Methodology", ln=True, fill=True)
+    pdf.ln(4)
+    glossary_items = [
+        ("Units Sold (Attributed)",
+         "Vehicles removed from the dealer's live inventory after receiving attributed campaign traffic."),
+        ("Est. Revenue Sold / Pipeline Value",
+         "Directional value estimates. New: base MSRP for the model. Used: base MSRP depreciated by age (15% year 1, 10% each following year). Not exact transaction prices; excludes trims, options, and dealer markups."),
+        ("Look-to-Book Ratio",
+         "Sold VDPs / Total Active VDPs - the conversion velocity of the inventory, split by New vs Used."),
+        ("Traffic Mix",
+         "Where audiences navigated on the site: VDPs, Service, Search, Incentives/Offers, Homepage."),
+        ("Missed Opportunities (The Watch List)",
+         "Active vehicles receiving above-average traffic that haven't sold yet. Review these VDPs for missing photos, 'Call for Price' buttons, or pricing outliers."),
+        ("Methodology Note",
+         "Inventory status reflects the dealer's website at the moment this report was run, not a historical snapshot."),
+    ]
+    for g_head, g_body in glossary_items:
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 7, safe_str(g_head), ln=True)
+        pdf.set_font("Arial", "", 9)
+        pdf.multi_cell(0, 5, safe_str(g_body))
+        pdf.ln(2)
+
     pdf_out = pdf.output(dest='S')
     return pdf_out.encode('latin-1') if isinstance(pdf_out, str) else bytes(pdf_out)
 
@@ -2274,25 +2651,29 @@ if st.session_state.current_report_id is not None:
     st.divider()
     st.markdown("### 📥 Export Reports")
     
-    include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in PDF", value=True)
+    include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in Exports (PDF & PowerPoint)", value=True)
     include_dealer_details = False
     if domain_count > 1:
-        include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in PDF", value=False)
+        include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in Exports (PDF & PowerPoint)", value=False)
         
     st.write("") 
 
     # Build the dashboard charts as images once, shared by the PDF and PPTX.
     chart_images = build_summary_chart_images(df, sold_df)
-    pptx_metrics = {'units': m_units, 'revenue': m_rev, 'pipeline': m_pipe, 'ltb': m_ltb}
+    metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors}
+    export_missed_df = missed_df if not sold_df.empty else pd.DataFrame()
 
     ex1, ex2, ex3, ex4 = st.columns(4)
     with ex1:
-        metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors}
-        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, missed_df if not sold_df.empty else pd.DataFrame(), include_missed_in_pdf, dealer_group_export, include_dealer_details, chart_images=chart_images)
+        pdf_data = create_pdf_report(df, sold_df, metrics_bundle, export_missed_df, include_missed_in_pdf, dealer_group_export, include_dealer_details, chart_images=chart_images)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
     with ex2:
-        pptx_data = build_pptx_report(df, sold_df, pptx_metrics, chart_images,
-                                      st.session_state.current_report_id)
+        pptx_data = build_pptx_report(df, sold_df, metrics_bundle, chart_images,
+                                      st.session_state.current_report_id,
+                                      missed_df=export_missed_df,
+                                      dealer_group=dealer_group_export,
+                                      include_dealer_details=include_dealer_details,
+                                      include_missed=include_missed_in_pdf)
         if pptx_data:
             st.download_button("📥 Download PowerPoint", data=pptx_data,
                                file_name=f"{st.session_state.current_report_id}_Summary.pptx",
