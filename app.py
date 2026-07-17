@@ -16,6 +16,7 @@ import os
 import html
 import random
 import threading
+import time
 from streamlit_gsheets import GSheetsConnection
 
 # --- CONFIGURATION & CUSTOM CSS ---
@@ -39,6 +40,8 @@ if 'min_visitors' not in st.session_state:
     st.session_state.min_visitors = 1
 if 'global_usage_count' not in st.session_state:
     st.session_state.global_usage_count = "..."
+if 'mc_month_usage' not in st.session_state:
+    st.session_state.mc_month_usage = None
 
 # --- THE DEALER API VAULT (Google Sheets Powered) ---
 FALLBACK_VAULT = {
@@ -97,6 +100,16 @@ def load_vault():
         try:
             usage_df = conn.read(worksheet="UsageStats", ttl=60)
             st.session_state.global_usage_count = len(usage_df)
+            # Sum this month's market lookups from our own report log, so the
+            # sidebar can show remaining budget without spending an API call.
+            if "MarketCheck Calls" in usage_df.columns:
+                ts = pd.to_datetime(usage_df["Timestamp"], errors="coerce", utc=True)
+                now_ts = pd.Timestamp.now(tz="UTC")
+                in_month = (ts.dt.year == now_ts.year) & (ts.dt.month == now_ts.month)
+                st.session_state.mc_month_usage = int(
+                    pd.to_numeric(usage_df.loc[in_month, "MarketCheck Calls"],
+                                  errors="coerce").fillna(0).sum()
+                )
         except Exception:
             pass
 
@@ -951,19 +964,74 @@ def get_marketcheck_key():
         return ""
 
 MC_ENDPOINT = "https://api.marketcheck.com/v2/dealerships/inventory"
-MC_PAGE_CAP = 500   # free-tier pagination ceiling (start must stay under this)
 
-class _CallCounter:
-    """Wraps a requests session to count outbound calls, for usage tracking."""
-    def __init__(self, session):
+def _mc_setting_int(name, default):
+    """Read an integer app setting from secrets (any nesting); default if absent."""
+    try:
+        v = _find_secret(st.secrets, name)
+        return int(str(v).strip()) if str(v).strip() else default
+    except Exception:
+        return default
+
+# Pagination ceiling per inventory slice. Free plan = 500 rows. After upgrading
+# to Basic, set MARKETCHECK_PAGE_CAP = 1500 in settings and every pull gets
+# cheaper (most dealers fit in one un-sliced pass).
+MC_PAGE_CAP = _mc_setting_int("MARKETCHECK_PAGE_CAP", 500)
+
+# Hard spending ceiling per report. A single run can never use more market
+# lookups than this, no matter what. Override with MARKETCHECK_BUDGET in
+# settings (suggested: 75 on the free plan, 150 on Basic).
+MC_BUDGET = _mc_setting_int("MARKETCHECK_BUDGET", 75)
+
+class _MCStop(Exception):
+    """Raised by the governor to halt the market-lookup phase immediately."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason   # "budget" | "limit" | "errors"
+
+class _MCGovernor:
+    """
+    Gatekeeper for every market lookup. Enforces the per-run budget, paces
+    requests under the plan's rate limit, and halts the phase instantly on
+    quota/auth refusals or repeated failures — so a run can never hang and can
+    never drain the monthly allowance.
+    """
+    def __init__(self, session, budget):
         self._s = session
+        self.budget = budget
         self.count = 0
+        self.stopped = None        # None, or the _MCStop reason
+        self._fail_streak = 0
+
     def get(self, *a, **k):
+        if self.stopped:
+            raise _MCStop(self.stopped)
+        if self.count >= self.budget:
+            self.stopped = "budget"
+            raise _MCStop("budget")
+        time.sleep(0.22)           # pace safely under 5 requests/second
         self.count += 1
-        return self._s.get(*a, **k)
-    def post(self, *a, **k):
-        self.count += 1
-        return self._s.post(*a, **k)
+        try:
+            r = self._s.get(*a, **k)
+        except Exception:
+            self._fail_streak += 1
+            if self._fail_streak >= 3:
+                self.stopped = "errors"
+                raise _MCStop("errors")
+            raise
+        if r.status_code in (401, 403, 429):
+            # Key rejected / quota exhausted / rate refusal: stop the whole
+            # phase now rather than burning calls into a wall.
+            self.stopped = "limit"
+            raise _MCStop("limit")
+        if r.status_code != 200:
+            self._fail_streak += 1
+            if self._fail_streak >= 3:
+                self.stopped = "errors"
+                raise _MCStop("errors")
+        else:
+            self._fail_streak = 0
+        return r
 
 def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None, rows=50, start=0):
     """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
@@ -982,6 +1050,8 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
             return (None, None)
         data = r.json()
         return (data.get("num_found", 0), data.get("listings", []))
+    except _MCStop:
+        raise   # governor halt: must reach the orchestrator, never swallowed
     except Exception:
         return (None, None)
 
@@ -1552,39 +1622,48 @@ if run_analysis_clicked:
             st.info("A few dealers couldn't be scanned directly. To resolve them, "
                     "the market-inventory lookup needs to be set up in settings.")
         else:
-            mc_session = _CallCounter(session)   # counts calls for usage tracking
-            # Verify the lookup is reachable before using it, so a setup problem
-            # surfaces as a clear message instead of silently unresolved cars.
-            first_dom = next(iter(mc_by_domain))
+            total_unres = sum(len(v) for v in mc_by_domain.values())
+            st.info(f"{len(mc_by_domain)} dealer(s) with {total_unres} vehicle(s) need the "
+                    f"market-inventory lookup — this run will use at most {MC_BUDGET} lookups.")
+            gov = _MCGovernor(session, MC_BUDGET)
+            resolved = 0
+            stop_reason = None
             try:
-                probe = mc_session.get("https://api.marketcheck.com/v2/search/car/active",
-                                       params={"api_key": mc_key, "source": first_dom, "rows": "0"},
-                                       timeout=15)
-                probe_code = probe.status_code
-            except Exception:
-                probe_code = None
-
-            if probe_code == 401:
-                st.warning("The market-inventory lookup key was rejected — a few dealers "
-                           "were left unresolved. Please check the key in settings.")
-            elif probe_code != 200:
-                st.warning("Couldn't reach the market-inventory lookup right now — "
-                           "a few dealers were left unresolved.")
-            else:
-                resolved = 0
+                # Cheap reachability probe (1 call): a bad key or exhausted plan
+                # halts here with a clear reason instead of failing silently.
+                gov.get("https://api.marketcheck.com/v2/search/car/active",
+                        params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "0"},
+                        timeout=15)
                 with st.spinner("Checking remaining vehicles against live market inventory..."):
-                    for dom, items in mc_by_domain.items():
+                    # Smallest dealers first: they're the cheapest to finish, so a
+                    # tight budget fully resolves as many dealers as possible
+                    # before it runs out (whole dealers beat everyone-half-done).
+                    for dom, items in sorted(mc_by_domain.items(), key=lambda kv: len(kv[1])):
                         year_items = [(url, v, get_year(url)) for url, v in items]
-                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, mc_session)
+                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, gov)
                         for url, status in dom_out.items():
                             vdp_results[url] = status
                             resolved += 1
-                mc_calls_used = mc_session.count
-                if resolved:
-                    st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market "
-                               f"inventory ({mc_calls_used} lookups used).")
-                else:
-                    st.info("A few dealers couldn't be matched in the market inventory.")
+            except _MCStop as stop:
+                stop_reason = stop.reason
+            mc_calls_used = gov.count
+            leftover = total_unres - resolved
+            if stop_reason == "limit":
+                st.warning(f"The market-inventory service declined further lookups (monthly "
+                           f"plan limit reached, or the key needs attention). Resolved "
+                           f"{resolved} vehicle(s) before stopping; {leftover} left unresolved.")
+            elif stop_reason == "budget":
+                st.warning(f"Reached this run's market-lookup budget of {MC_BUDGET}. Resolved "
+                           f"{resolved} vehicle(s); {leftover} left unresolved. The budget can "
+                           f"be raised in settings if needed.")
+            elif stop_reason == "errors":
+                st.warning(f"The market-inventory lookup stopped after repeated errors. "
+                           f"Resolved {resolved} vehicle(s); {leftover} left unresolved.")
+            elif resolved:
+                st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market "
+                           f"inventory ({mc_calls_used} lookups used).")
+            else:
+                st.info("A few dealers couldn't be matched in the market inventory.")
 
 
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
@@ -1627,6 +1706,10 @@ if run_analysis_clicked:
             updated_usage = pd.concat([usage_df, new_usage], ignore_index=True)
             gsheets_conn.update(worksheet="UsageStats", data=updated_usage)
             st.session_state.global_usage_count = len(updated_usage)
+            if isinstance(st.session_state.get('mc_month_usage'), int):
+                st.session_state.mc_month_usage += mc_calls_used
+            elif mc_calls_used:
+                st.session_state.mc_month_usage = mc_calls_used
     except Exception:
         pass 
     
@@ -1654,6 +1737,14 @@ if st.session_state.history:
         
     st.sidebar.divider()
     st.sidebar.markdown(f"📈 **Total Global Scans:** `{st.session_state.global_usage_count}`")
+    with st.sidebar.expander("📊 Market Lookup Status", expanded=False):
+        st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
+        st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
+        st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
+        if isinstance(st.session_state.get('mc_month_usage'), int):
+            st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}` (from report log)")
+        st.caption("Budget and page cap can be changed in settings via "
+                   "MARKETCHECK_BUDGET and MARKETCHECK_PAGE_CAP.")
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
