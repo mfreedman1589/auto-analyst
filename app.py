@@ -650,8 +650,16 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
               rounded=False)
     add_text(s1, Inches(0.5), Inches(0.15), Inches(12.3), Inches(0.8),
              "Premion Website Attribution", 34, PERI, bold=True)
+    # Client-facing: show the report DATE, not the pull time.
+    display_title = re.sub(r'\s*\(\d{1,2}:\d{2}\s*[AP]M[^)]*\)', '', str(report_title))
+    display_title = re.sub(r'\s*-?\s*\d{1,2}:\d{2}\s*[AP]M(\s*ET)?\s*$', '', display_title).strip()
+    try:
+        report_date = datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%B %d, %Y").replace(" 0", " ")
+    except Exception:
+        report_date = datetime.datetime.now().strftime("%B %d, %Y")
     add_text(s1, Inches(0.5), Inches(0.9), Inches(12.3), Inches(0.5),
-             f"Inventory Impact Report  |  {report_title}", 18, WHITE, bold=True)
+             f"Inventory Impact Report  |  {display_title}  |  {report_date}",
+             18, WHITE, bold=True)
     add_text(s1, Inches(0.5), Inches(1.75), Inches(12.3), Inches(0.5),
              "Complementary to your website attribution: the vehicles our audience "
              "shopped that have since moved off the lot.", 13, GREY, italic=True)
@@ -1649,50 +1657,78 @@ class _MCGovernor:
         return r
 
 def _mc_cache_load(conn):
-    """Read the MCCache tab -> {domain: (vin_set, age_days)}. Best-effort."""
+    """Read the MCCache tab -> {domain: {active, absent, complete, age}}. Best-effort."""
     out = {}
     try:
         df = conn.read(worksheet="MCCache", ttl=0)
         now = datetime.datetime.now(datetime.timezone.utc)
         for _, row in df.iterrows():
             dom = str(row.get("Domain", "")).strip().lower()
-            vins_raw = str(row.get("VINs", ""))
             try:
                 ts = pd.to_datetime(str(row.get("Timestamp", "")), utc=True)
                 age = (now - ts.to_pydatetime()).total_seconds() / 86400.0
             except Exception:
                 continue
-            vin_set = {v for v in (x.strip().upper() for x in vins_raw.split(","))
-                       if len(v) == 17}
-            if dom and vin_set and age >= 0:
-                out[dom] = (vin_set, age)
+            def _vset(cell):
+                return {v for v in (x.strip().upper() for x in str(cell or "").split(","))
+                        if len(v) == 17}
+            active = _vset(row.get("ActiveVINs", ""))
+            absent = _vset(row.get("AbsentVINs", ""))
+            complete = str(row.get("Complete", "")).strip().upper() in ("TRUE", "1", "YES")
+            if dom and (active or absent) and age >= 0:
+                out[dom] = {"active": active, "absent": absent,
+                            "complete": complete, "age": age}
     except Exception:
         pass
     return out
 
-def _mc_cache_save(conn, updates):
-    """Upsert {domain: vin_set} into the MCCache tab. Best-effort, never raises."""
+def _mc_cache_save(conn, updates, max_age_days=7):
+    """
+    Upsert {domain: {active, absent, complete}} into MCCache. A partial (per-VIN)
+    result merges into a fresh existing row instead of replacing it; a complete
+    store snapshot replaces the row and restarts its clock. Never raises.
+    """
     if not updates:
         return
     try:
-        cols = ["Domain", "VINs", "Count", "Timestamp"]
+        cols = ["Domain", "ActiveVINs", "AbsentVINs", "Complete", "Count", "Timestamp"]
         try:
             df = conn.read(worksheet="MCCache", ttl=0)
             if df is None or not isinstance(df, pd.DataFrame):
                 df = pd.DataFrame(columns=cols)
         except Exception:
             df = pd.DataFrame(columns=cols)
+        existing = _mc_cache_load(conn) if len(df) else {}
         rows = {}
         for _, r in df.iterrows():
             d = str(r.get("Domain", "")).strip().lower()
             if d:
                 rows[d] = {c: r.get(c, "") for c in cols}
         now = str(datetime.datetime.now(datetime.timezone.utc))
-        for dom, vin_set in updates.items():
-            if not vin_set or len(vin_set) > 2500:   # keep cell under Sheets limits
+        for dom, upd in updates.items():
+            active = set(upd.get("active") or set())
+            absent = set(upd.get("absent") or set())
+            complete = bool(upd.get("complete"))
+            prev = existing.get(dom)
+            ts = now
+            if prev and prev["age"] <= max_age_days and not complete:
+                # Merge partial knowledge into the fresh existing row; keep its
+                # clock so staleness is anchored to the oldest information.
+                active |= prev["active"]
+                absent |= prev["absent"] - active
+                complete = prev["complete"]
+                old_row = rows.get(dom, {})
+                ts = old_row.get("Timestamp", now) or now
+            if complete:
+                absent = set()   # a complete snapshot implies absence for the rest
+            if len(active) + len(absent) > 2500:   # keep cells under Sheets limits
                 continue
-            rows[dom] = {"Domain": dom, "VINs": ",".join(sorted(vin_set)),
-                         "Count": len(vin_set), "Timestamp": now}
+            rows[dom] = {"Domain": dom,
+                         "ActiveVINs": ",".join(sorted(active)),
+                         "AbsentVINs": ",".join(sorted(absent)),
+                         "Complete": "TRUE" if complete else "FALSE",
+                         "Count": len(active) + len(absent),
+                         "Timestamp": ts}
         data = pd.DataFrame(list(rows.values()), columns=cols)
         try:
             conn.update(worksheet="MCCache", data=data)
@@ -1933,7 +1969,7 @@ def _mc_vin_single(url, vin, api_key, session):
                  for l in data.get("listings", []))
     return ("Available" if active else "SOLD (Not in Market Inventory)", None)
 
-def _mc_resolve_vins(domain, items, api_key, session):
+def _mc_resolve_vins(domain, items, api_key, session, cache_out=None):
     """
     VIN-based resolution for the search endpoint: ask the market about the
     exact VINs in the report instead of pulling the dealer's whole store.
@@ -1991,9 +2027,22 @@ def _mc_resolve_vins(domain, items, api_key, session):
                     session.last_error = (err if not batch_err
                                           else f"{batch_err} | then {err}")
                 if "not honored" in err or "HTTP 4" in err:
-                    return out   # systemic: stop burning calls on this dealer
+                    break   # systemic: stop burning calls on this dealer
                 continue
             out[u] = status
+    # Remember what the per-VIN checks learned (partial dealer knowledge).
+    if cache_out is not None and out:
+        entry = cache_out.setdefault(domain, {"active": set(), "absent": set(),
+                                              "complete": False})
+        by_url = {u: v for u, v in valid}
+        for u, status in out.items():
+            v = by_url.get(u)
+            if not v:
+                continue
+            if status == "Available":
+                entry["active"].add(v)
+            elif str(status).startswith("SOLD"):
+                entry["absent"].add(v)
     return out
 
 def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
@@ -2017,19 +2066,25 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
         if nf_s is not None and 0 <= nf_s <= 25000:
             if complete_s:
                 if cache_out is not None:
-                    cache_out[domain] = set(vins_s)
+                    cache_out[domain] = {"active": set(vins_s), "absent": set(),
+                                         "complete": True}
                 _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, True)
                 return out
             # Partial pull (over the page cap): found VINs are safely
             # Available; resolve the remainder per-VIN.
             _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, False)
+            if cache_out is not None:
+                cache_out[domain] = {"active": set(vins_s), "absent": set(),
+                                     "complete": False}
             remaining = [(u, v, y) for u, v, y in items if u not in out]
-            out.update(_mc_resolve_vins(domain, remaining, api_key, session))
+            out.update(_mc_resolve_vins(domain, remaining, api_key, session,
+                                        cache_out=cache_out))
             return out
         if nf_s is not None and nf_s > 25000 and hasattr(session, "last_error"):
             session.last_error = (f"source filter returned num_found={nf_s} for "
                                   f"{domain} — falling back to VIN lookups")
-        out.update(_mc_resolve_vins(domain, items, api_key, session))
+        out.update(_mc_resolve_vins(domain, items, api_key, session,
+                                    cache_out=cache_out))
         return out
     # Try the whole store; if it's over the cap this aborts after one call.
     vins, complete, nf = _mc_pull(domain, api_key, session)
@@ -2044,7 +2099,8 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
         return out
     if complete:
         if cache_out is not None:
-            cache_out[domain] = set(vins)
+            cache_out[domain] = {"active": set(vins), "absent": set(),
+                                 "complete": True}
         _mc_apply(out, [(u, v) for u, v, _ in items], vins, True)
         return out
 
@@ -2508,15 +2564,23 @@ if run_analysis_clicked:
                     # before it runs out (whole dealers beat everyone-half-done).
                     for dom, items in sorted(mc_by_domain.items(), key=lambda kv: len(kv[1])):
                         cached = mc_cache.get(dom)
-                        if cached is not None and cached[1] <= MC_CACHE_DAYS:
-                            # Fresh snapshot in memory: resolve at zero cost.
-                            hit_out = {}
-                            _mc_apply(hit_out, items, cached[0], True)
-                            for url, status in hit_out.items():
-                                vdp_results[url] = status
+                        if cached is not None and cached["age"] <= MC_CACHE_DAYS:
+                            # Serve everything the memory knows at zero cost.
+                            live_items = []
+                            for url, v in items:
+                                vv = str(v).upper().strip()
+                                if vv in cached["active"]:
+                                    vdp_results[url] = "Available"
+                                elif cached["complete"] or vv in cached["absent"]:
+                                    vdp_results[url] = "SOLD (Not in Market Inventory)"
+                                else:
+                                    live_items.append((url, v))
+                                    continue
                                 resolved += 1
                                 cache_hits += 1
-                            continue
+                            if not live_items:
+                                continue
+                            items = live_items   # only unknowns go to live lookups
                         year_items = [(url, v, get_year(url)) for url, v in items]
                         dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, gov,
                                                              cache_out=mc_cache_out)
@@ -2528,7 +2592,7 @@ if run_analysis_clicked:
             mc_calls_used = gov.count
             leftover = total_unres - resolved
             if mc_cache_out and MC_CACHE_DAYS > 0 and gsheets_conn is not None:
-                _mc_cache_save(gsheets_conn, mc_cache_out)
+                _mc_cache_save(gsheets_conn, mc_cache_out, max_age_days=MC_CACHE_DAYS)
             if cache_hits:
                 st.caption(f"🗂️ {cache_hits} vehicle(s) resolved from the dealer-inventory "
                            f"memory (snapshots under {MC_CACHE_DAYS} days old) — 0 lookups spent.")
