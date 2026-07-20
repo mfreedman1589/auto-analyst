@@ -1530,7 +1530,21 @@ def get_marketcheck_key():
     except Exception:
         return ""
 
-MC_ENDPOINT = "https://api.marketcheck.com/v2/dealerships/inventory"
+# Sold-detection endpoint. CONFIRMED VIA BILLING (Jul 2026): /v2/dealerships/
+# inventory bills as the "Dealer Inventory Syndication API" at $1.00/call,
+# while /v2/search/car/active (Inventory Search API) bills at $0.002/call —
+# 500x cheaper for the same source-filtered VIN pull, same response shape.
+# The search endpoint is the default; override with MARKETCHECK_ENDPOINT in
+# settings only if MarketCheck advises otherwise. NOTE: with the search
+# endpoint, keep MARKETCHECK_PAGE_SIZE at 50 (its per-call row maximum).
+_MC_DEFAULT_ENDPOINT = "https://api.marketcheck.com/v2/search/car/active"
+def _mc_endpoint():
+    try:
+        v = str(_find_secret(st.secrets, "MARKETCHECK_ENDPOINT")).strip()
+        return v if v.startswith("http") else _MC_DEFAULT_ENDPOINT
+    except Exception:
+        return _MC_DEFAULT_ENDPOINT
+MC_ENDPOINT = _mc_endpoint()
 
 def _mc_setting_int(name, default):
     """Read an integer app setting from secrets (any nesting); default if absent."""
@@ -2728,8 +2742,8 @@ else:
     st.markdown("---")
     st.markdown("### What's New")
     st.markdown("Here's what's new in the Auto-Sales Intelligence Agent:")
-    st.markdown("1. **⚡ Faster dealer setup:** Connect a dealer's inventory in one click with the key bookmarklet, or let Auto-Detect find it for you — and test any dealer's connection instantly, without running a full report first.")
-    st.markdown("2. **🔎 Locked dealers now resolve:** When a dealer's site blocks direct scanning, the tool falls back to live market inventory to still tell you which vehicles sold — so dealers aren't left unresolved wherever coverage exists.")
-    st.markdown("3. **🏷️ Catching 'hidden' sales:** Dealers often leave sold cars on their site marked 'Out of Stock' for SEO. The tool reads the fine print and rightfully counts these as sold.")
-    st.markdown("4. **🏢 Auto Group dashboards & live filters:** A multi-site report automatically generates a clean, store-by-store breakdown, with an interactive slider to adjust traffic thresholds on the fly.")
-    st.markdown("5. **📄 Reliable exports:** PDF and spreadsheet exports handle special characters (like ™ or ®) cleanly, with no crashes.")
+    st.markdown("1. **🔓 Blocked dealer sites resolve automatically:** When a dealer's website blocks our scanner, the tool now falls back to live national market inventory to determine which vehicles sold. No more hunting for API URLs — the need for the manual 'Dealer Inspire Fix' and Vault keys should now be minimal to none. Reports just run.")
+    st.markdown("2. **📊 New PowerPoint download:** One click builds a client-ready deck styled to fit seamlessly into our Premion attribution reporting — executive summary KPIs, traffic and sales charts, Top Sold, the Missed Opportunities watch list, per-dealer deep dives for auto groups, and a glossary slide.")
+    st.markdown("3. **📄 Upgraded PDF report:** A dashboard-style executive summary banner up top, sleeker charts and tables in the Premion palette (and no more cut-off charts), plus a built-in Glossary & Methodology page — ready to forward straight to a client.")
+    st.markdown("4. **🚙 Smarter model roll-ups:** Top Sold and Missed Opportunity *models* now aggregate across trims — six Silverado 1500s show as one line instead of six — while the detail tables keep the full trim-level names.")
+    st.markdown("5. **🏢 Auto Groups, everywhere:** Multi-dealer reports carry through to both the PDF and the PowerPoint, with an optional store-by-store deep dive for every rooftop in the group.")
