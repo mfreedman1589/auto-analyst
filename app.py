@@ -2429,7 +2429,7 @@ if run_analysis_clicked:
                 # Cheap reachability probe (1 call): a bad key or exhausted plan
                 # halts here with a clear reason instead of failing silently.
                 gov.get("https://api.marketcheck.com/v2/search/car/active",
-                        params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "0"},
+                        params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "1"},
                         timeout=15)
                 with st.spinner("Checking remaining vehicles against live market inventory..."):
                     # Smallest dealers first: they're the cheapest to finish, so a
