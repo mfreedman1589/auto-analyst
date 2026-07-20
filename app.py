@@ -1564,6 +1564,12 @@ MC_PAGE_CAP = _mc_setting_int("MARKETCHECK_PAGE_CAP", 500)
 # settings (suggested: 75 on the free plan, 150 on Basic).
 MC_BUDGET = _mc_setting_int("MARKETCHECK_BUDGET", 75)
 
+# Optional month-wide ceiling across ALL reports (0 = disabled). For the free
+# plan set MARKETCHECK_MONTHLY_CAP = 450 in settings: runs stop spending when
+# the month's total (from the UsageStats log) reaches the cap, keeping a
+# reserve under the plan's 500-call allowance.
+MC_MONTH_CAP = _mc_setting_int("MARKETCHECK_MONTHLY_CAP", 0)
+
 # Cars fetched per lookup. Free plan serves small pages regardless of what's
 # requested, so the safe default is 50. Basic honors larger pages — set
 # MARKETCHECK_PAGE_SIZE = 200 in settings and big dealers cost ~1/4 the calls.
@@ -1582,9 +1588,11 @@ class _MCGovernor:
     quota/auth refusals or repeated failures — so a run can never hang and can
     never drain the monthly allowance.
     """
-    def __init__(self, session, budget):
+    def __init__(self, session, budget, month_used=0, month_cap=0):
         self._s = session
         self.budget = budget
+        self.month_used = int(month_used or 0)
+        self.month_cap = int(month_cap or 0)
         self.count = 0
         self.stopped = None        # None, or the _MCStop reason
         self.last_error = None     # human-readable detail of the last failure
@@ -1596,6 +1604,9 @@ class _MCGovernor:
         if self.count >= self.budget:
             self.stopped = "budget"
             raise _MCStop("budget")
+        if self.month_cap and (self.month_used + self.count) >= self.month_cap:
+            self.stopped = "monthly"
+            raise _MCStop("monthly")
         time.sleep(0.22)           # pace safely under 5 requests/second
         self.count += 1
         try:
@@ -1873,7 +1884,11 @@ def _mc_resolve_vins(domain, items, api_key, session):
     if not valid:
         return out
     CHUNK = 40
-    mode = None   # decided by the first chunk: "batch" or "single"
+    # vins= is disabled: the 7/20 diagnostic returned num_found=211 for a
+    # SINGLE VIN (wrong semantics — likely matching historical listings),
+    # while vin= returned exactly 1. Per-VIN is production-proven; the batch
+    # machinery is kept below in case MarketCheck fixes the param.
+    mode = "single"
     batch_err = None
     for i in range(0, len(valid), CHUNK):
         chunk = valid[i:i + CHUNK]
@@ -1924,12 +1939,28 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
     Returns {url: "Available" | "SOLD (Not in Market Inventory)"}.
     """
     out = {}
-    # On the search endpoint, VIN-batch is the right tool: exact answers for
-    # the report's VINs in 1-2 calls, immune to store size and source-filter
-    # quirks (the 7/20 run proved source= isn't honored there: a full-store
-    # pull saw national num_found and burned the whole budget sub-slicing).
+    # On the search endpoint: store-pull first (the 7/20 diagnostic confirmed
+    # source= is honored there — Hamby returned num_found=75, dealer-sized),
+    # which resolves a whole dealer in ceil(inventory/50) calls. The VIN path
+    # (proven in production 7/20: exact match to baseline) is the fallback for
+    # errors, unfiltered-looking responses, and whatever a partial pull left.
     if MC_ENDPOINT == _MC_DEFAULT_ENDPOINT:
-        return _mc_resolve_vins(domain, items, api_key, session)
+        vins_s, complete_s, nf_s = _mc_pull(domain, api_key, session)
+        if nf_s is not None and 0 <= nf_s <= 25000:
+            if complete_s:
+                _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, True)
+                return out
+            # Partial pull (over the page cap): found VINs are safely
+            # Available; resolve the remainder per-VIN.
+            _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, False)
+            remaining = [(u, v, y) for u, v, y in items if u not in out]
+            out.update(_mc_resolve_vins(domain, remaining, api_key, session))
+            return out
+        if nf_s is not None and nf_s > 25000 and hasattr(session, "last_error"):
+            session.last_error = (f"source filter returned num_found={nf_s} for "
+                                  f"{domain} — falling back to VIN lookups")
+        out.update(_mc_resolve_vins(domain, items, api_key, session))
+        return out
     # Try the whole store; if it's over the cap this aborts after one call.
     vins, complete, nf = _mc_pull(domain, api_key, session)
     if nf is None:
@@ -2383,7 +2414,9 @@ if run_analysis_clicked:
             total_unres = sum(len(v) for v in mc_by_domain.values())
             st.info(f"{len(mc_by_domain)} dealer(s) with {total_unres} vehicle(s) need the "
                     f"market-inventory lookup — this run will use at most {MC_BUDGET} lookups.")
-            gov = _MCGovernor(session, MC_BUDGET)
+            gov = _MCGovernor(session, MC_BUDGET,
+                              month_used=st.session_state.get('mc_month_usage') or 0,
+                              month_cap=MC_MONTH_CAP)
             resolved = 0
             stop_reason = None
             try:
@@ -2416,6 +2449,10 @@ if run_analysis_clicked:
                 st.warning(f"Reached this run's market-lookup budget of {MC_BUDGET}. Resolved "
                            f"{resolved} vehicle(s); {leftover} left unresolved. The budget can "
                            f"be raised in settings if needed.")
+            elif stop_reason == "monthly":
+                st.warning(f"Paused market lookups: the month-wide cap of {MC_MONTH_CAP} "
+                           f"(MARKETCHECK_MONTHLY_CAP) is reached. Resolved {resolved} "
+                           f"vehicle(s); {leftover} left unresolved this run.")
             elif stop_reason == "errors":
                 st.warning(f"The market-inventory lookup stopped after repeated errors. "
                            f"Resolved {resolved} vehicle(s); {leftover} left unresolved."
@@ -2507,7 +2544,8 @@ if st.session_state.history:
         st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
         st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
         if isinstance(st.session_state.get('mc_month_usage'), int):
-            st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}` (from report log)")
+            cap_note = f" of `{MC_MONTH_CAP}` cap" if MC_MONTH_CAP else ""
+            st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}`{cap_note} (from report log)")
         st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
                    "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
 
