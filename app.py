@@ -2460,6 +2460,9 @@ if run_analysis_clicked:
             elif resolved:
                 st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market "
                            f"inventory ({mc_calls_used} lookups used).")
+                if err_detail:
+                    st.caption(f"⚠️ Some lookups fell back to a slower method — last error: "
+                               f"{err_detail}")
             elif err_detail:
                 st.error(f"Market-inventory lookups are failing — {leftover} vehicle(s) left "
                          f"unresolved. Last error — {err_detail}")
@@ -2561,15 +2564,28 @@ if st.session_state.history:
                 st.error("No MarketCheck key configured.")
             else:
                 import requests as _rq
-                probes = [("source=", {"source": diag_domain.strip()}),
+                probes = [("source= (rows=1)", {"source": diag_domain.strip()}),
+                          ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
+                                                              "rows": "50"}),
                           ("vins=", {"vins": diag_vin.strip().upper()}),
                           ("vin=", {"vin": diag_vin.strip().upper()})]
+                # Second probe replicates the report's store call exactly:
+                # same params AND the same session construction.
+                _diag_sess = _rq.Session()
+                try:
+                    _retry = Retry(total=3, backoff_factor=1,
+                                   status_forcelist=[429, 500, 502, 503, 504])
+                    _ad = HTTPAdapter(max_retries=_retry)
+                    _diag_sess.mount('https://', _ad)
+                except Exception:
+                    pass
                 for label, extra in probes:
                     if "vin" in label and not diag_vin.strip():
                         st.markdown(f"**{label}** — skipped (no VIN entered)")
                         continue
                     try:
-                        pr = _rq.get(MC_ENDPOINT, params={"api_key": dkey, "rows": "1",
+                        _getter = _diag_sess.get if "report-style" in label else _rq.get
+                        pr = _getter(MC_ENDPOINT, params={"api_key": dkey, "rows": "1",
                                                           "start": "0", **extra}, timeout=20)
                         if pr.status_code == 200:
                             nf = pr.json().get("num_found", "?")
