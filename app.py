@@ -1587,6 +1587,7 @@ class _MCGovernor:
         self.budget = budget
         self.count = 0
         self.stopped = None        # None, or the _MCStop reason
+        self.last_error = None     # human-readable detail of the last failure
         self._fail_streak = 0
 
     def get(self, *a, **k):
@@ -1599,7 +1600,10 @@ class _MCGovernor:
         self.count += 1
         try:
             r = self._s.get(*a, **k)
-        except Exception:
+        except _MCStop:
+            raise
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {str(e)[:160]}"
             self._fail_streak += 1
             if self._fail_streak >= 3:
                 self.stopped = "errors"
@@ -1611,6 +1615,11 @@ class _MCGovernor:
             self.stopped = "limit"
             raise _MCStop("limit")
         if r.status_code != 200:
+            try:
+                body = str(r.text)[:200]
+            except Exception:
+                body = ""
+            self.last_error = f"HTTP {r.status_code}: {body}"
             self._fail_streak += 1
             if self._fail_streak >= 3:
                 self.stopped = "errors"
@@ -1621,11 +1630,32 @@ class _MCGovernor:
 
 def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None, rows=50, start=0):
     """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
+    on_search = (MC_ENDPOINT == _MC_DEFAULT_ENDPOINT)
+    if on_search:
+        # The Inventory Search API hard-caps rows at 50 and 422s on more —
+        # clamp here so a MARKETCHECK_PAGE_SIZE=200 setting (fine on the old
+        # syndication endpoint) can't poison every request.
+        try:
+            rows = min(int(rows), 50)
+        except Exception:
+            rows = 50
     params = {"api_key": api_key, "source": domain, "rows": str(rows), "start": str(start)}
     if year:
         params["year"] = str(year)
     if year_range:
-        params["year_range"] = year_range
+        translated = False
+        if on_search:
+            # The search endpoint has no year_range param; send a comma list
+            # of years instead (equivalent filter, universally supported).
+            try:
+                lo, hi = (int(x) for x in str(year_range).split("-"))
+                if 0 <= hi - lo <= 30:
+                    params["year"] = ",".join(str(y) for y in range(lo, hi + 1))
+                    translated = True
+            except Exception:
+                pass
+        if not translated:
+            params["year_range"] = year_range
     if car_type:
         params["car_type"] = car_type
     if price_range:
@@ -1759,6 +1789,69 @@ def _mc_band(domain, api_key, session, band_items, out):
     for yr, its in per_year.items():
         _mc_resolve_year(domain, api_key, session, yr, its, out)
 
+def _mc_resolve_vins(domain, items, api_key, session):
+    """
+    VIN-batch resolution (search endpoint): instead of pulling the dealer's
+    whole store, ask the market directly about the exact VINs in the report,
+    ~40 per call. A VIN active anywhere in the market -> Available (the safe
+    direction); a VIN absent from the national active market -> Sold.
+    Guards: if num_found is implausible for the batch (filter not honored),
+    the chunk is left unresolved with a visible error instead of guessing.
+    items = [(url, vin, year)]. Returns {url: status}.
+    """
+    out = {}
+    valid = []
+    for u, v, _y in items:
+        vv = str(v or "").upper().strip()
+        if len(vv) == 17:
+            valid.append((u, vv))
+    CHUNK = 40
+    for i in range(0, len(valid), CHUNK):
+        chunk = valid[i:i + CHUNK]
+        params = {"api_key": api_key, "vins": ",".join(v for _, v in chunk),
+                  "rows": "50", "start": "0"}
+        try:
+            r = session.get(MC_ENDPOINT, params=params, timeout=25)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            nf = int(data.get("num_found", 0) or 0)
+            listings = data.get("listings", [])
+            # Same VIN can be listed by a few sources, but num_found beyond
+            # ~20x the batch means the vins filter was ignored (national
+            # results). Refuse to interpret that — never risk a false Sold.
+            if nf > len(chunk) * 20:
+                if hasattr(session, "last_error"):
+                    session.last_error = (f"vins filter not honored on {MC_ENDPOINT} "
+                                          f"(num_found={nf} for {len(chunk)} VINs)")
+                continue
+            active = set()
+            for lst in listings:
+                vv = str(lst.get("vin", "")).upper().strip()
+                if vv:
+                    active.add(vv)
+            start = len(listings)
+            while start < nf and start < 400:
+                r2 = session.get(MC_ENDPOINT, params={**params, "start": str(start)},
+                                 timeout=25)
+                if r2.status_code != 200:
+                    break
+                more = r2.json().get("listings", [])
+                if not more:
+                    break
+                for lst in more:
+                    vv = str(lst.get("vin", "")).upper().strip()
+                    if vv:
+                        active.add(vv)
+                start += len(more)
+            for u, v in chunk:
+                out[u] = "Available" if v in active else "SOLD (Not in Market Inventory)"
+        except _MCStop:
+            raise
+        except Exception:
+            continue
+    return out
+
 def resolve_dealer_marketcheck(domain, items, api_key, session):
     """
     Resolve one locked dealer's unresolved cars against MarketCheck, minimizing
@@ -1770,9 +1863,22 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
     Returns {url: "Available" | "SOLD (Not in Market Inventory)"}.
     """
     out = {}
+    # On the search endpoint, VIN-batch is the right tool: exact answers for
+    # the report's VINs in 1-2 calls, immune to store size and source-filter
+    # quirks (the 7/20 run proved source= isn't honored there: a full-store
+    # pull saw national num_found and burned the whole budget sub-slicing).
+    if MC_ENDPOINT == _MC_DEFAULT_ENDPOINT:
+        return _mc_resolve_vins(domain, items, api_key, session)
     # Try the whole store; if it's over the cap this aborts after one call.
     vins, complete, nf = _mc_pull(domain, api_key, session)
     if nf is None:
+        return out
+    if nf > 25000:
+        # No dealership has 25k cars: the source filter isn't filtering.
+        # Stop this dealer at ONE call instead of sub-slicing into a storm.
+        if hasattr(session, "last_error"):
+            session.last_error = (f"source filter not honored for {domain} "
+                                  f"(num_found={nf}) — dealer left unresolved")
         return out
     if complete:
         _mc_apply(out, [(u, v) for u, v, _ in items], vins, True)
@@ -2239,20 +2345,26 @@ if run_analysis_clicked:
                 stop_reason = stop.reason
             mc_calls_used = gov.count
             leftover = total_unres - resolved
+            err_detail = getattr(gov, "last_error", None)
             if stop_reason == "limit":
                 st.warning(f"The market-inventory service declined further lookups (monthly "
                            f"plan limit reached, or the key needs attention). Resolved "
-                           f"{resolved} vehicle(s) before stopping; {leftover} left unresolved.")
+                           f"{resolved} vehicle(s) before stopping; {leftover} left unresolved."
+                           + (f" Last response — {err_detail}" if err_detail else ""))
             elif stop_reason == "budget":
                 st.warning(f"Reached this run's market-lookup budget of {MC_BUDGET}. Resolved "
                            f"{resolved} vehicle(s); {leftover} left unresolved. The budget can "
                            f"be raised in settings if needed.")
             elif stop_reason == "errors":
                 st.warning(f"The market-inventory lookup stopped after repeated errors. "
-                           f"Resolved {resolved} vehicle(s); {leftover} left unresolved.")
+                           f"Resolved {resolved} vehicle(s); {leftover} left unresolved."
+                           + (f" Last error — {err_detail}" if err_detail else ""))
             elif resolved:
                 st.success(f"✅ Resolved {resolved} additional vehicle(s) from live market "
                            f"inventory ({mc_calls_used} lookups used).")
+            elif err_detail:
+                st.error(f"Market-inventory lookups are failing — {leftover} vehicle(s) left "
+                         f"unresolved. Last error — {err_detail}")
             else:
                 st.info("A few dealers couldn't be matched in the market inventory.")
 
