@@ -1789,14 +1789,79 @@ def _mc_band(domain, api_key, session, band_items, out):
     for yr, its in per_year.items():
         _mc_resolve_year(domain, api_key, session, yr, its, out)
 
+def _mc_vin_batch(chunk, api_key, session):
+    """
+    One vins= batch lookup for [(url, vin)]. Returns ({url: status}, error).
+    error is None on success; a string when the filter isn't honored or the
+    call fails (caller decides whether to fall back).
+    """
+    params = {"api_key": api_key, "vins": ",".join(v for _, v in chunk),
+              "rows": "50", "start": "0"}
+    r = session.get(MC_ENDPOINT, params=params, timeout=25)
+    if r.status_code != 200:
+        try:
+            body = str(r.text)[:160]
+        except Exception:
+            body = ""
+        return ({}, f"vins= batch: HTTP {r.status_code}: {body}")
+    data = r.json()
+    nf = int(data.get("num_found", 0) or 0)
+    listings = data.get("listings", [])
+    # Same VIN can be listed by a few sources, but num_found beyond ~20x the
+    # batch means the vins filter was ignored (national results). Refuse to
+    # interpret that — never risk a false Sold.
+    if nf > len(chunk) * 20:
+        return ({}, f"vins= filter not honored (num_found={nf} for {len(chunk)} VINs)")
+    active = set()
+    for lst in listings:
+        vv = str(lst.get("vin", "")).upper().strip()
+        if vv:
+            active.add(vv)
+    start = len(listings)
+    while start < nf and start < 400:
+        r2 = session.get(MC_ENDPOINT, params={**params, "start": str(start)}, timeout=25)
+        if r2.status_code != 200:
+            break
+        more = r2.json().get("listings", [])
+        if not more:
+            break
+        for lst in more:
+            vv = str(lst.get("vin", "")).upper().strip()
+            if vv:
+                active.add(vv)
+        start += len(more)
+    return ({u: ("Available" if v in active else "SOLD (Not in Market Inventory)")
+             for u, v in chunk}, None)
+
+def _mc_vin_single(url, vin, api_key, session):
+    """
+    One vin= lookup. Returns (status_or_None, error). num_found for a single
+    VIN must be tiny; a huge count means the filter is ignored -> error.
+    """
+    r = session.get(MC_ENDPOINT, params={"api_key": api_key, "vin": vin,
+                                         "rows": "10", "start": "0"}, timeout=25)
+    if r.status_code != 200:
+        try:
+            body = str(r.text)[:160]
+        except Exception:
+            body = ""
+        return (None, f"vin= single: HTTP {r.status_code}: {body}")
+    data = r.json()
+    nf = int(data.get("num_found", 0) or 0)
+    if nf > 50:
+        return (None, f"vin= filter not honored (num_found={nf} for 1 VIN)")
+    active = any(str(l.get("vin", "")).upper().strip() == vin
+                 for l in data.get("listings", []))
+    return ("Available" if active else "SOLD (Not in Market Inventory)", None)
+
 def _mc_resolve_vins(domain, items, api_key, session):
     """
-    VIN-batch resolution (search endpoint): instead of pulling the dealer's
-    whole store, ask the market directly about the exact VINs in the report,
-    ~40 per call. A VIN active anywhere in the market -> Available (the safe
-    direction); a VIN absent from the national active market -> Sold.
-    Guards: if num_found is implausible for the batch (filter not honored),
-    the chunk is left unresolved with a visible error instead of guessing.
+    VIN-based resolution for the search endpoint: ask the market about the
+    exact VINs in the report instead of pulling the dealer's whole store.
+    Adaptive: tries a vins= batch first (~40 VINs per call); if that filter
+    isn't honored by this account, falls back to per-VIN vin= lookups (one
+    call each). If neither filter works, every failure detail is recorded
+    and the dealer is left unresolved — never guessed.
     items = [(url, vin, year)]. Returns {url: status}.
     """
     out = {}
@@ -1805,51 +1870,47 @@ def _mc_resolve_vins(domain, items, api_key, session):
         vv = str(v or "").upper().strip()
         if len(vv) == 17:
             valid.append((u, vv))
+    if not valid:
+        return out
     CHUNK = 40
+    mode = None   # decided by the first chunk: "batch" or "single"
+    batch_err = None
     for i in range(0, len(valid), CHUNK):
         chunk = valid[i:i + CHUNK]
-        params = {"api_key": api_key, "vins": ",".join(v for _, v in chunk),
-                  "rows": "50", "start": "0"}
-        try:
-            r = session.get(MC_ENDPOINT, params=params, timeout=25)
-            if r.status_code != 200:
+        if mode in (None, "batch"):
+            try:
+                res, err = _mc_vin_batch(chunk, api_key, session)
+            except _MCStop:
+                raise
+            except Exception as e:
+                res, err = {}, f"vins= batch: {type(e).__name__}"
+            if err is None:
+                mode = "batch"
+                out.update(res)
                 continue
-            data = r.json()
-            nf = int(data.get("num_found", 0) or 0)
-            listings = data.get("listings", [])
-            # Same VIN can be listed by a few sources, but num_found beyond
-            # ~20x the batch means the vins filter was ignored (national
-            # results). Refuse to interpret that — never risk a false Sold.
-            if nf > len(chunk) * 20:
+            if mode == "batch":
+                # Batch worked earlier but failed now: transient — skip chunk.
                 if hasattr(session, "last_error"):
-                    session.last_error = (f"vins filter not honored on {MC_ENDPOINT} "
-                                          f"(num_found={nf} for {len(chunk)} VINs)")
+                    session.last_error = err
                 continue
-            active = set()
-            for lst in listings:
-                vv = str(lst.get("vin", "")).upper().strip()
-                if vv:
-                    active.add(vv)
-            start = len(listings)
-            while start < nf and start < 400:
-                r2 = session.get(MC_ENDPOINT, params={**params, "start": str(start)},
-                                 timeout=25)
-                if r2.status_code != 200:
-                    break
-                more = r2.json().get("listings", [])
-                if not more:
-                    break
-                for lst in more:
-                    vv = str(lst.get("vin", "")).upper().strip()
-                    if vv:
-                        active.add(vv)
-                start += len(more)
-            for u, v in chunk:
-                out[u] = "Available" if v in active else "SOLD (Not in Market Inventory)"
-        except _MCStop:
-            raise
-        except Exception:
-            continue
+            batch_err = err   # first chunk failed -> try per-VIN fallback
+            mode = "single"
+        # Per-VIN mode (fallback)
+        for u, v in chunk:
+            try:
+                status, err = _mc_vin_single(u, v, api_key, session)
+            except _MCStop:
+                raise
+            except Exception as e:
+                status, err = None, f"vin= single: {type(e).__name__}"
+            if err is not None:
+                if hasattr(session, "last_error"):
+                    session.last_error = (err if not batch_err
+                                          else f"{batch_err} | then {err}")
+                if "not honored" in err or "HTTP 4" in err:
+                    return out   # systemic: stop burning calls on this dealer
+                continue
+            out[u] = status
     return out
 
 def resolve_dealer_marketcheck(domain, items, api_key, session):
@@ -2449,6 +2510,41 @@ if st.session_state.history:
             st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}` (from report log)")
         st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
                    "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
+
+    with st.sidebar.expander("🧪 Market Lookup Diagnostic", expanded=False):
+        st.caption("Fires 3 tiny probes (~$0.01 total) to show which filters "
+                   "this API key honors on the current endpoint. Use a real "
+                   "dealer domain and a VIN currently on their site.")
+        diag_domain = st.text_input("Dealer domain", value="hamby.com", key="mc_diag_dom")
+        diag_vin = st.text_input("A live VIN from that dealer", value="", key="mc_diag_vin")
+        if st.button("Run diagnostic", key="mc_diag_btn"):
+            dkey = get_marketcheck_key()
+            if not dkey:
+                st.error("No MarketCheck key configured.")
+            else:
+                import requests as _rq
+                probes = [("source=", {"source": diag_domain.strip()}),
+                          ("vins=", {"vins": diag_vin.strip().upper()}),
+                          ("vin=", {"vin": diag_vin.strip().upper()})]
+                for label, extra in probes:
+                    if "vin" in label and not diag_vin.strip():
+                        st.markdown(f"**{label}** — skipped (no VIN entered)")
+                        continue
+                    try:
+                        pr = _rq.get(MC_ENDPOINT, params={"api_key": dkey, "rows": "1",
+                                                          "start": "0", **extra}, timeout=20)
+                        if pr.status_code == 200:
+                            nf = pr.json().get("num_found", "?")
+                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
+                        else:
+                            st.markdown(f"**{label}** — HTTP {pr.status_code}: "
+                                        f"`{str(pr.text)[:120]}`")
+                    except Exception as e:
+                        st.markdown(f"**{label}** — {type(e).__name__}: {str(e)[:120]}")
+                    time.sleep(0.25)
+                st.caption("How to read this: a filter is honored when num_found is "
+                           "small (dealer-sized for source=, ~1-5 for vin=). A number "
+                           "in the millions means that filter is being ignored.")
 
 # --- MAIN DASHBOARD DISPLAY ---
 if st.session_state.current_report_id is not None:
