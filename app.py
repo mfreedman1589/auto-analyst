@@ -1676,10 +1676,16 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
         if r.status_code != 200:
             return (None, None)
         data = r.json()
+        if "num_found" not in data:
+            if hasattr(session, "last_error"):
+                session.last_error = f"200 OK but unexpected body: {str(data)[:140]}"
+            return (None, None)
         return (data.get("num_found", 0), data.get("listings", []))
     except _MCStop:
         raise   # governor halt: must reach the orchestrator, never swallowed
-    except Exception:
+    except Exception as e:
+        if hasattr(session, "last_error"):
+            session.last_error = f"response error: {type(e).__name__}: {str(e)[:140]}"
         return (None, None)
 
 def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None):
