@@ -3129,31 +3129,35 @@ if st.session_state.current_report_id is not None:
     with st.expander("ℹ️ Glossary & Guide: How to read this report"):
         st.markdown("""
         ### **Definitions & Insights**
-        
-        **1. Units Sold**
-        The total count of vehicles identified as "Sold" (removed from inventory) *after* receiving attributed traffic from our campaign. This confirms that the audience we drove to the site actively shopped for cars that moved off the lot.
-        
-        **2. Estimated Value (Rev & Pipeline)**
-        A data-driven approximation of the inventory's dollar value. 
-        * **New Cars:** Calculated using Base MSRP for the specific model.
-        * **Used Cars:** Calculated using the base MSRP depreciated by age.
-        * *Note: This is a directional estimate to gauge "Total Pipeline Power," not accounting for specific trim levels, options, or dealer markups.*
-        
-        **3. Look-to-Book Ratio (Velocity Metric)**
-        The efficiency metric of the inventory. It measures the conversion velocity of the cars we drove traffic to. By using the Interactive VDP Filter, this transforms into a Velocity Metric—proving that highly concentrated traffic yields significantly higher conversion rates.
-        * *Formula:* `(Sold VDPs) ÷ (Total Active VDPs)`
-        
-        **4. Tier 2 / Auto Group Breakdown**
-        Aggregates performance across multiple dealerships if a multi-domain report is uploaded. 
-        * *Clean Reporting:* Dealerships that received general traffic but had **0 VDPs shopped** are automatically filtered out of this table to keep insights focused on high-intent inventory shoppers.
-        
-        **5. Top Sold Units & Missed Opportunities ("The Watch List")**
-        * **Top Sold:** The specific vehicles that received the highest exposure and subsequently sold.
-        * **Missed Opportunities:** Active vehicles receiving **above-average traffic** that haven't sold yet. Audit these VDPs immediately for missing photos, "Call for Price" buttons, or pricing outliers!
-        
-        **6. Inventory Syncs & Troubleshooting**
-        If your report shows **0 Sold** and triggers an "Action Required" alert, the dealer's inventory database requires a direct connection. 
-        * *Action:* Check the top of your report for the **Action Required** panel. It will guide you to find the API URL. The app will automatically save it to our permanent database (Vault) so that dealer is seamlessly synced moving forward!
+        *(These match the Glossary & Methodology section in your PDF and PowerPoint exports.)*
+
+        **1. Units Sold (Attributed)**
+        Vehicles removed from the dealer's live inventory *after* receiving attributed campaign traffic. This confirms the audience we drove to the site actively shopped for cars that moved off the lot.
+
+        **2. Est. Revenue Sold & Total Pipeline Value**
+        Directional, data-driven value estimates — not exact transaction prices.
+        * **New cars:** Base MSRP for the specific model.
+        * **Used cars:** Base MSRP depreciated by age — **15% for year one, 10% for each following year.**
+        * *Excludes trim levels, options, and dealer markups. Use it to gauge "pipeline power," not to quote deal values.*
+
+        **3. Look-to-Book Ratio**
+        The conversion velocity of the inventory we advertised, split New vs. Used.
+        * *Formula:* `Sold VDPs ÷ Total Active VDPs`
+        * *Tip: the Interactive VDP Filter turns this into a velocity story — concentrated traffic converts at visibly higher rates.*
+
+        **4. Traffic Mix**
+        Where audiences navigated on the dealer's site: VDPs, Service, Search, Incentives/Offers, Homepage. **VDP visits are the high-intent inventory shoppers** — the audience most likely to buy.
+
+        **5. Top Sold & Missed Opportunities ("The Watch List")**
+        * **Top Sold:** the vehicles that received the most exposure and subsequently sold. The aggregated *Top Models* view rolls all trims of the same model into one line (six Silverado 1500s = one row); the detail tables keep full trim-level names.
+        * **Missed Opportunities:** active vehicles receiving **above-average traffic** that haven't sold yet. Position this as a consultative Watch List — audit those VDPs for missing photos, "Call for Price" buttons, or pricing outliers.
+
+        **6. Auto Group / Tier 2 Breakdown**
+        Multi-dealer reports aggregate store-by-store automatically. Dealerships with general traffic but **0 VDPs shopped** are filtered out to keep the table focused on inventory shoppers.
+
+        **7. How Inventory Is Checked (Methodology)**
+        The tool scans the dealer's website in **real time** — results reflect inventory status at the moment the report runs, not a historical snapshot. If a dealer's site blocks scanning, the tool **automatically falls back to live national market inventory** (and remembers recent answers for about a week), so manual fixes are rarely needed.
+        * *Trust but verify:* before presenting, click a few **Top Sold** links (they should 404 or redirect to the search page) and a few **Watch List** links (they should load a live vehicle page).
         """)
 
 else:
