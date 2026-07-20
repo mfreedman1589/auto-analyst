@@ -1530,13 +1530,17 @@ def get_marketcheck_key():
     except Exception:
         return ""
 
-# Sold-detection endpoint. CONFIRMED VIA BILLING (Jul 2026): /v2/dealerships/
-# inventory bills as the "Dealer Inventory Syndication API" at $1.00/call,
-# while /v2/search/car/active (Inventory Search API) bills at $0.002/call —
-# 500x cheaper for the same source-filtered VIN pull, same response shape.
-# The search endpoint is the default; override with MARKETCHECK_ENDPOINT in
-# settings only if MarketCheck advises otherwise. NOTE: with the search
-# endpoint, keep MARKETCHECK_PAGE_SIZE at 50 (its per-call row maximum).
+# Sold-detection endpoint. CONFIRMED BY MARKETCHECK (Jul 2026):
+#  - /v2/dealerships/inventory = "Dealer Inventory Syndication API": $1.00/call
+#    on PAID tiers, but NO DATA FEES on the FREE tier (10 listings/page there).
+#  - /v2/search/car/active = "Inventory Search API" ($0.002/call): officially
+#    meant for zip/lat-long searches; source= filtering works in isolation but
+#    is unsupported and flaky mid-run (per-VIN vin= fallback covers it).
+# FREE-TIER CONFIG (the $0/month setup): set in settings —
+#   MARKETCHECK_ENDPOINT = "https://api.marketcheck.com/v2/dealerships/inventory"
+#   MARKETCHECK_PAGE_SIZE = 10, MARKETCHECK_PAGE_CAP = 500,
+#   MARKETCHECK_BUDGET = 75, MARKETCHECK_MONTHLY_CAP = 450
+# On PAID tiers keep the default below (search endpoint, pennies per run).
 _MC_DEFAULT_ENDPOINT = "https://api.marketcheck.com/v2/search/car/active"
 def _mc_endpoint():
     try:
