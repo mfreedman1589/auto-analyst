@@ -1574,6 +1574,11 @@ MC_BUDGET = _mc_setting_int("MARKETCHECK_BUDGET", 75)
 # reserve under the plan's 500-call allowance.
 MC_MONTH_CAP = _mc_setting_int("MARKETCHECK_MONTHLY_CAP", 0)
 
+# Dealer-inventory memory: complete MarketCheck store pulls are remembered in
+# the Google Sheet ("MCCache" tab) and reused for this many days, so repeat
+# reports on the same blocked dealer cost ZERO lookups. 0 disables.
+MC_CACHE_DAYS = _mc_setting_int("MARKETCHECK_CACHE_DAYS", 7)
+
 # Cars fetched per lookup. Free plan serves small pages regardless of what's
 # requested, so the safe default is 50. Basic honors larger pages — set
 # MARKETCHECK_PAGE_SIZE = 200 in settings and big dealers cost ~1/4 the calls.
@@ -1642,6 +1647,59 @@ class _MCGovernor:
         else:
             self._fail_streak = 0
         return r
+
+def _mc_cache_load(conn):
+    """Read the MCCache tab -> {domain: (vin_set, age_days)}. Best-effort."""
+    out = {}
+    try:
+        df = conn.read(worksheet="MCCache", ttl=0)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for _, row in df.iterrows():
+            dom = str(row.get("Domain", "")).strip().lower()
+            vins_raw = str(row.get("VINs", ""))
+            try:
+                ts = pd.to_datetime(str(row.get("Timestamp", "")), utc=True)
+                age = (now - ts.to_pydatetime()).total_seconds() / 86400.0
+            except Exception:
+                continue
+            vin_set = {v for v in (x.strip().upper() for x in vins_raw.split(","))
+                       if len(v) == 17}
+            if dom and vin_set and age >= 0:
+                out[dom] = (vin_set, age)
+    except Exception:
+        pass
+    return out
+
+def _mc_cache_save(conn, updates):
+    """Upsert {domain: vin_set} into the MCCache tab. Best-effort, never raises."""
+    if not updates:
+        return
+    try:
+        cols = ["Domain", "VINs", "Count", "Timestamp"]
+        try:
+            df = conn.read(worksheet="MCCache", ttl=0)
+            if df is None or not isinstance(df, pd.DataFrame):
+                df = pd.DataFrame(columns=cols)
+        except Exception:
+            df = pd.DataFrame(columns=cols)
+        rows = {}
+        for _, r in df.iterrows():
+            d = str(r.get("Domain", "")).strip().lower()
+            if d:
+                rows[d] = {c: r.get(c, "") for c in cols}
+        now = str(datetime.datetime.now(datetime.timezone.utc))
+        for dom, vin_set in updates.items():
+            if not vin_set or len(vin_set) > 2500:   # keep cell under Sheets limits
+                continue
+            rows[dom] = {"Domain": dom, "VINs": ",".join(sorted(vin_set)),
+                         "Count": len(vin_set), "Timestamp": now}
+        data = pd.DataFrame(list(rows.values()), columns=cols)
+        try:
+            conn.update(worksheet="MCCache", data=data)
+        except Exception:
+            conn.create(worksheet="MCCache", data=data)   # tab doesn't exist yet
+    except Exception:
+        pass
 
 def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None, rows=50, start=0):
     """One MarketCheck dealer-inventory request. Returns (num_found, listings) or (None, None)."""
@@ -1938,7 +1996,7 @@ def _mc_resolve_vins(domain, items, api_key, session):
             out[u] = status
     return out
 
-def resolve_dealer_marketcheck(domain, items, api_key, session):
+def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
     """
     Resolve one locked dealer's unresolved cars against MarketCheck, minimizing
     calls. items = [(url, vin, year)]. Each slice is size-checked as it's pulled
@@ -1958,6 +2016,8 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
         vins_s, complete_s, nf_s = _mc_pull(domain, api_key, session)
         if nf_s is not None and 0 <= nf_s <= 25000:
             if complete_s:
+                if cache_out is not None:
+                    cache_out[domain] = set(vins_s)
                 _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, True)
                 return out
             # Partial pull (over the page cap): found VINs are safely
@@ -1983,6 +2043,8 @@ def resolve_dealer_marketcheck(domain, items, api_key, session):
                                   f"(num_found={nf}) — dealer left unresolved")
         return out
     if complete:
+        if cache_out is not None:
+            cache_out[domain] = set(vins)
         _mc_apply(out, [(u, v) for u, v, _ in items], vins, True)
         return out
 
@@ -2429,6 +2491,11 @@ if run_analysis_clicked:
                               month_cap=MC_MONTH_CAP)
             resolved = 0
             stop_reason = None
+            cache_hits = 0
+            mc_cache_out = {}
+            mc_cache = {}
+            if MC_CACHE_DAYS > 0 and gsheets_conn is not None:
+                mc_cache = _mc_cache_load(gsheets_conn)
             try:
                 # Cheap reachability probe (1 call): a bad key or exhausted plan
                 # halts here with a clear reason instead of failing silently.
@@ -2440,8 +2507,19 @@ if run_analysis_clicked:
                     # tight budget fully resolves as many dealers as possible
                     # before it runs out (whole dealers beat everyone-half-done).
                     for dom, items in sorted(mc_by_domain.items(), key=lambda kv: len(kv[1])):
+                        cached = mc_cache.get(dom)
+                        if cached is not None and cached[1] <= MC_CACHE_DAYS:
+                            # Fresh snapshot in memory: resolve at zero cost.
+                            hit_out = {}
+                            _mc_apply(hit_out, items, cached[0], True)
+                            for url, status in hit_out.items():
+                                vdp_results[url] = status
+                                resolved += 1
+                                cache_hits += 1
+                            continue
                         year_items = [(url, v, get_year(url)) for url, v in items]
-                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, gov)
+                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, gov,
+                                                             cache_out=mc_cache_out)
                         for url, status in dom_out.items():
                             vdp_results[url] = status
                             resolved += 1
@@ -2449,6 +2527,11 @@ if run_analysis_clicked:
                 stop_reason = stop.reason
             mc_calls_used = gov.count
             leftover = total_unres - resolved
+            if mc_cache_out and MC_CACHE_DAYS > 0 and gsheets_conn is not None:
+                _mc_cache_save(gsheets_conn, mc_cache_out)
+            if cache_hits:
+                st.caption(f"🗂️ {cache_hits} vehicle(s) resolved from the dealer-inventory "
+                           f"memory (snapshots under {MC_CACHE_DAYS} days old) — 0 lookups spent.")
             err_detail = getattr(gov, "last_error", None)
             if stop_reason == "limit":
                 st.warning(f"The market-inventory service declined further lookups (monthly "
