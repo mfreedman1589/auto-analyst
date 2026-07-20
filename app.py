@@ -2555,9 +2555,26 @@ if run_analysis_clicked:
             try:
                 # Cheap reachability probe (1 call): a bad key or exhausted plan
                 # halts here with a clear reason instead of failing silently.
-                gov.get("https://api.marketcheck.com/v2/search/car/active",
-                        params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "1"},
-                        timeout=15)
+                # Skipped when the dealer-inventory memory covers every vehicle
+                # in this run — a fully-cached repeat costs ZERO lookups.
+                needs_live = False
+                for _dom, _its in mc_by_domain.items():
+                    _c = mc_cache.get(_dom)
+                    if _c is None or _c["age"] > MC_CACHE_DAYS:
+                        needs_live = True
+                        break
+                    if not _c["complete"]:
+                        for _u, _v in _its:
+                            _vv = str(_v).upper().strip()
+                            if _vv not in _c["active"] and _vv not in _c["absent"]:
+                                needs_live = True
+                                break
+                    if needs_live:
+                        break
+                if needs_live:
+                    gov.get("https://api.marketcheck.com/v2/search/car/active",
+                            params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "1"},
+                            timeout=15)
                 with st.spinner("Checking remaining vehicles against live market inventory..."):
                     # Smallest dealers first: they're the cheapest to finish, so a
                     # tight budget fully resolves as many dealers as possible
