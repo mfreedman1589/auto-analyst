@@ -1587,6 +1587,12 @@ MC_MONTH_CAP = _mc_setting_int("MARKETCHECK_MONTHLY_CAP", 0)
 # reports on the same blocked dealer cost ZERO lookups. 0 disables.
 MC_CACHE_DAYS = _mc_setting_int("MARKETCHECK_CACHE_DAYS", 7)
 
+# Auto-continue: when the per-pass budget stops a run mid-dealer, automatically
+# start another budgeted pass on the still-unresolved vehicles (max 4 passes per
+# run, halts immediately on zero progress, and the monthly cap always wins).
+# 1 = on (default), 0 = off (single-pass behavior).
+MC_AUTO_CONTINUE = _mc_setting_int("MARKETCHECK_AUTO_CONTINUE", 1)
+
 # Cars fetched per lookup. Free plan serves small pages regardless of what's
 # requested, so the safe default is 50. Basic honors larger pages — set
 # MARKETCHECK_PAGE_SIZE = 200 in settings and big dealers cost ~1/4 the calls.
@@ -1721,6 +1727,8 @@ def _mc_cache_save(conn, updates, max_age_days=7):
                 ts = old_row.get("Timestamp", now) or now
             if complete:
                 absent = set()   # a complete snapshot implies absence for the rest
+            if not active and not absent:
+                continue         # nothing learned: never write an empty row
             if len(active) + len(absent) > 2500:   # keep cells under Sheets limits
                 continue
             rows[dom] = {"Domain": dom,
@@ -1969,7 +1977,7 @@ def _mc_vin_single(url, vin, api_key, session):
                  for l in data.get("listings", []))
     return ("Available" if active else "SOLD (Not in Market Inventory)", None)
 
-def _mc_resolve_vins(domain, items, api_key, session, cache_out=None):
+def _mc_resolve_vins(domain, items, api_key, session, cache_out=None, out=None):
     """
     VIN-based resolution for the search endpoint: ask the market about the
     exact VINs in the report instead of pulling the dealer's whole store.
@@ -1977,9 +1985,10 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None):
     isn't honored by this account, falls back to per-VIN vin= lookups (one
     call each). If neither filter works, every failure detail is recorded
     and the dealer is left unresolved — never guessed.
-    items = [(url, vin, year)]. Returns {url: status}.
+    items = [(url, vin, year)]. Returns {url: status}. Pass a dict as `out`
+    to keep partial results if a governor stop interrupts the loop mid-dealer.
     """
-    out = {}
+    out = {} if out is None else out
     valid = []
     for u, v, _y in items:
         vv = str(v or "").upper().strip()
@@ -2030,22 +2039,19 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None):
                     break   # systemic: stop burning calls on this dealer
                 continue
             out[u] = status
-    # Remember what the per-VIN checks learned (partial dealer knowledge).
-    if cache_out is not None and out:
-        entry = cache_out.setdefault(domain, {"active": set(), "absent": set(),
-                                              "complete": False})
-        by_url = {u: v for u, v in valid}
-        for u, status in out.items():
-            v = by_url.get(u)
-            if not v:
-                continue
-            if status == "Available":
-                entry["active"].add(v)
-            elif str(status).startswith("SOLD"):
-                entry["absent"].add(v)
+            # Remember each answer AS IT ARRIVES, so a budget/kill-switch stop
+            # mid-dealer can never throw away knowledge already paid for.
+            if cache_out is not None:
+                entry = cache_out.setdefault(domain, {"active": set(),
+                                                      "absent": set(),
+                                                      "complete": False})
+                if status == "Available":
+                    entry["active"].add(v)
+                elif str(status).startswith("SOLD"):
+                    entry["absent"].add(v)
     return out
 
-def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
+def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, out=None):
     """
     Resolve one locked dealer's unresolved cars against MarketCheck, minimizing
     calls. items = [(url, vin, year)]. Each slice is size-checked as it's pulled
@@ -2055,7 +2061,7 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
         car_type if a single year is over the cap), older years bundled into bands.
     Returns {url: "Available" | "SOLD (Not in Market Inventory)"}.
     """
-    out = {}
+    out = {} if out is None else out
     # On the search endpoint: store-pull first (the 7/20 diagnostic confirmed
     # source= is honored there — Hamby returned num_found=75, dealer-sized),
     # which resolves a whole dealer in ceil(inventory/50) calls. The VIN path
@@ -2073,18 +2079,18 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None):
             # Partial pull (over the page cap): found VINs are safely
             # Available; resolve the remainder per-VIN.
             _mc_apply(out, [(u, v) for u, v, _ in items], vins_s, False)
-            if cache_out is not None:
+            if cache_out is not None and vins_s:
                 cache_out[domain] = {"active": set(vins_s), "absent": set(),
                                      "complete": False}
             remaining = [(u, v, y) for u, v, y in items if u not in out]
-            out.update(_mc_resolve_vins(domain, remaining, api_key, session,
-                                        cache_out=cache_out))
+            _mc_resolve_vins(domain, remaining, api_key, session,
+                             cache_out=cache_out, out=out)
             return out
         if nf_s is not None and nf_s > 25000 and hasattr(session, "last_error"):
             session.last_error = (f"source filter returned num_found={nf_s} for "
                                   f"{domain} — falling back to VIN lookups")
-        out.update(_mc_resolve_vins(domain, items, api_key, session,
-                                    cache_out=cache_out))
+        _mc_resolve_vins(domain, items, api_key, session,
+                         cache_out=cache_out, out=out)
         return out
     # Try the whole store; if it's over the cap this aborts after one call.
     vins, complete, nf = _mc_pull(domain, api_key, session)
@@ -2542,9 +2548,8 @@ if run_analysis_clicked:
             total_unres = sum(len(v) for v in mc_by_domain.values())
             st.info(f"{len(mc_by_domain)} dealer(s) with {total_unres} vehicle(s) need the "
                     f"market-inventory lookup — this run will use at most {MC_BUDGET} lookups.")
-            gov = _MCGovernor(session, MC_BUDGET,
-                              month_used=st.session_state.get('mc_month_usage') or 0,
-                              month_cap=MC_MONTH_CAP)
+            MC_AUTO_PASSES = 4 if MC_AUTO_CONTINUE else 1
+            month_base = st.session_state.get('mc_month_usage') or 0
             resolved = 0
             stop_reason = None
             cache_hits = 0
@@ -2552,67 +2557,105 @@ if run_analysis_clicked:
             mc_cache = {}
             if MC_CACHE_DAYS > 0 and gsheets_conn is not None:
                 mc_cache = _mc_cache_load(gsheets_conn)
-            try:
-                # Cheap reachability probe (1 call): a bad key or exhausted plan
-                # halts here with a clear reason instead of failing silently.
-                # Skipped when the dealer-inventory memory covers every vehicle
-                # in this run — a fully-cached repeat costs ZERO lookups.
-                needs_live = False
-                for _dom, _its in mc_by_domain.items():
-                    _c = mc_cache.get(_dom)
-                    if _c is None or _c["age"] > MC_CACHE_DAYS:
-                        needs_live = True
-                        break
-                    if not _c["complete"]:
-                        for _u, _v in _its:
-                            _vv = str(_v).upper().strip()
-                            if _vv not in _c["active"] and _vv not in _c["absent"]:
+            total_calls = 0
+            pending = {dom: list(its) for dom, its in mc_by_domain.items()}
+            gov = None
+            mc_pass = 0
+            for mc_pass in range(MC_AUTO_PASSES):
+                gov = _MCGovernor(session, MC_BUDGET,
+                                  month_used=month_base + total_calls,
+                                  month_cap=MC_MONTH_CAP)
+                stop_reason = None
+                pass_start_resolved = resolved
+                try:
+                    if mc_pass == 0:
+                        # Cheap reachability probe (1 call): a bad key or exhausted
+                        # plan halts here with a clear reason instead of failing
+                        # silently. Skipped when the dealer-inventory memory covers
+                        # every vehicle — a fully-cached repeat costs ZERO lookups.
+                        needs_live = False
+                        for _dom, _its in pending.items():
+                            _c = mc_cache.get(_dom)
+                            if _c is None or _c["age"] > MC_CACHE_DAYS:
                                 needs_live = True
                                 break
-                    if needs_live:
-                        break
-                if needs_live:
-                    gov.get("https://api.marketcheck.com/v2/search/car/active",
-                            params={"api_key": mc_key, "source": next(iter(mc_by_domain)), "rows": "1"},
-                            timeout=15)
-                with st.spinner("Checking remaining vehicles against live market inventory..."):
-                    # Smallest dealers first: they're the cheapest to finish, so a
-                    # tight budget fully resolves as many dealers as possible
-                    # before it runs out (whole dealers beat everyone-half-done).
-                    for dom, items in sorted(mc_by_domain.items(), key=lambda kv: len(kv[1])):
-                        cached = mc_cache.get(dom)
-                        if cached is not None and cached["age"] <= MC_CACHE_DAYS:
-                            # Serve everything the memory knows at zero cost.
-                            live_items = []
-                            for url, v in items:
-                                vv = str(v).upper().strip()
-                                if vv in cached["active"]:
-                                    vdp_results[url] = "Available"
-                                elif cached["complete"] or vv in cached["absent"]:
-                                    vdp_results[url] = "SOLD (Not in Market Inventory)"
-                                else:
-                                    live_items.append((url, v))
+                            if not _c["complete"]:
+                                for _u, _v in _its:
+                                    _vv = str(_v).upper().strip()
+                                    if _vv not in _c["active"] and _vv not in _c["absent"]:
+                                        needs_live = True
+                                        break
+                            if needs_live:
+                                break
+                        if needs_live:
+                            gov.get("https://api.marketcheck.com/v2/search/car/active",
+                                    params={"api_key": mc_key, "source": next(iter(pending)), "rows": "1"},
+                                    timeout=15)
+                    spin_msg = ("Checking remaining vehicles against live market inventory..."
+                                if mc_pass == 0 else
+                                f"Large dealer: continuing lookups automatically (pass {mc_pass + 1})...")
+                    with st.spinner(spin_msg):
+                        # Smallest dealers first: they're the cheapest to finish, so a
+                        # tight budget fully resolves as many dealers as possible
+                        # before it runs out (whole dealers beat everyone-half-done).
+                        for dom, items in sorted(pending.items(), key=lambda kv: len(kv[1])):
+                            cached = mc_cache.get(dom)
+                            if cached is not None and cached["age"] <= MC_CACHE_DAYS:
+                                # Serve everything the memory knows at zero cost.
+                                live_items = []
+                                for url, v in items:
+                                    vv = str(v).upper().strip()
+                                    if vv in cached["active"]:
+                                        vdp_results[url] = "Available"
+                                    elif cached["complete"] or vv in cached["absent"]:
+                                        vdp_results[url] = "SOLD (Not in Market Inventory)"
+                                    else:
+                                        live_items.append((url, v))
+                                        continue
+                                    resolved += 1
+                                    cache_hits += 1
+                                if not live_items:
                                     continue
-                                resolved += 1
-                                cache_hits += 1
-                            if not live_items:
-                                continue
-                            items = live_items   # only unknowns go to live lookups
-                        year_items = [(url, v, get_year(url)) for url, v in items]
-                        dom_out = resolve_dealer_marketcheck(dom, year_items, mc_key, gov,
-                                                             cache_out=mc_cache_out)
-                        for url, status in dom_out.items():
-                            vdp_results[url] = status
-                            resolved += 1
-            except _MCStop as stop:
-                stop_reason = stop.reason
-            mc_calls_used = gov.count
+                                items = live_items   # only unknowns go to live lookups
+                            year_items = [(url, v, get_year(url)) for url, v in items]
+                            dom_out = {}
+                            try:
+                                resolve_dealer_marketcheck(dom, year_items, mc_key, gov,
+                                                           cache_out=mc_cache_out,
+                                                           out=dom_out)
+                            finally:
+                                # A governor stop mid-dealer must never discard the
+                                # answers already collected for this dealer.
+                                for url, status in dom_out.items():
+                                    vdp_results[url] = status
+                                    resolved += 1
+                except _MCStop as stop:
+                    stop_reason = stop.reason
+                total_calls += gov.count
+                # Anything still unresolved rolls into the next pass.
+                new_pending = {}
+                for dom, its in pending.items():
+                    left = [(url, v) for url, v in its
+                            if str(vdp_results.get(url, "ERROR")).startswith("ERROR")]
+                    if left:
+                        new_pending[dom] = left
+                pending = new_pending
+                if not pending:
+                    break                       # everything resolved
+                if stop_reason != "budget":
+                    break                       # real halt (limit/errors/monthly)
+                if resolved == pass_start_resolved:
+                    break                       # zero progress: never loop-burn
+            mc_calls_used = total_calls
             leftover = total_unres - resolved
             if mc_cache_out and MC_CACHE_DAYS > 0 and gsheets_conn is not None:
                 _mc_cache_save(gsheets_conn, mc_cache_out, max_age_days=MC_CACHE_DAYS)
             if cache_hits:
                 st.caption(f"🗂️ {cache_hits} vehicle(s) resolved from the dealer-inventory "
                            f"memory (snapshots under {MC_CACHE_DAYS} days old) — 0 lookups spent.")
+            if mc_pass > 0:
+                st.caption(f"🔁 Large dealer detected: lookups continued automatically across "
+                           f"{mc_pass + 1} budget passes ({mc_calls_used} total lookups).")
             err_detail = getattr(gov, "last_error", None)
             if stop_reason == "limit":
                 st.warning(f"The market-inventory service declined further lookups (monthly "
