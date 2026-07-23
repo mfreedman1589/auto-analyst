@@ -6,3 +6,5 @@ beautifulsoup4
 pytz
 fpdf
 st-gsheets-connection
+matplotlib
+python-pptx
