@@ -543,6 +543,49 @@ def build_summary_chart_images(df, sold_df):
             pass
     return images
 
+def build_group_chart_images(dealer_group, top_n=10):
+    """
+    Render the two Auto Group dashboard charts (Top Dealers by Traffic / by
+    Attributed Sales) to PNG bytes for the PDF and PPTX. Horizontal bars so
+    long dealer names stay readable. Returns {} on any failure.
+    """
+    images = {}
+    if dealer_group is None or dealer_group.empty:
+        return images
+    specs = [('group_traffic', 'Total Visitors', 'Top Dealers by Traffic', PREMION_BLUE),
+             ('group_sales', 'Units Sold', 'Top Dealers by Attributed Sales', PREMION_BLUE)]
+    for key, col, title, color in specs:
+        try:
+            if col not in dealer_group.columns:
+                continue
+            d = (dealer_group[['Dealer', col]].copy()
+                 .sort_values(col, ascending=False).head(top_n)
+                 .sort_values(col, ascending=True))
+            if d.empty or float(d[col].max()) <= 0:
+                continue
+            labels = [str(x)[:34] for x in d['Dealer']]
+            fig, ax = plt.subplots()
+            fig.patch.set_facecolor("white")
+            colors = [color] * len(d)
+            colors[-1] = PREMION_NAVY          # spotlight the leader
+            bars = ax.barh(labels, d[col], color=colors, height=0.62)
+            fmt = (lambda v: f"{v:,.0f}")
+            ax.bar_label(bars, labels=[fmt(v) for v in d[col]], padding=4,
+                         fontsize=9, fontweight='bold', color=PREMION_NAVY)
+            ax.set_title(title, loc='left', fontweight='bold',
+                         color=PREMION_NAVY, fontsize=13)
+            ax.tick_params(axis='y', labelsize=9)
+            ax.set_xticks([])
+            for s in ('top', 'right', 'bottom'):
+                ax.spines[s].set_visible(False)
+            ax.spines['left'].set_color('#D1D5DB')
+            ax.set_xlim(0, float(d[col].max()) * 1.18)
+            ax.margins(y=0.02)
+            images[key] = _fig_to_png_bytes(fig, 6.2, 4.3)
+        except Exception:
+            continue
+    return images
+
 def build_kpi_band_image(metrics):
     """
     Render the Executive Summary top-line as a navy dashboard-style KPI band
@@ -839,6 +882,20 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         add_table(s4, Inches(0.5), Inches(2.0), Inches(12.3), rows,
                   [4.2, 0.9, 1.0, 2.4], font_size=10)
 
+    # --- Auto Group performance charts (multi-dealer) ---
+    if has_group and (chart_images.get('group_traffic') or chart_images.get('group_sales')):
+        sgc = new_slide("Auto Group Performance")
+        if chart_images.get('group_traffic') and chart_images.get('group_sales'):
+            add_picture_fit(sgc, chart_images['group_traffic'], 0.45, 1.5, 6.1, 4.7)
+            add_picture_fit(sgc, chart_images['group_sales'], 6.8, 1.5, 6.1, 4.7)
+        else:
+            only = chart_images.get('group_traffic') or chart_images.get('group_sales')
+            add_picture_fit(sgc, only, 3.6, 1.5, 6.1, 4.7)
+        add_text(sgc, Inches(0.5), Inches(6.45), Inches(12.3), Inches(0.5),
+                 "Where the campaign drove traffic across the group - and which "
+                 "stores converted it into inventory movement.", 12, GREY,
+                 italic=True, align=PP_ALIGN.CENTER)
+
     # --- Auto Group scoreboard (multi-dealer) ---
     if has_group:
         group_rows = dealer_group.reset_index(drop=True)
@@ -1053,7 +1110,47 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, " 2. Auto Group / Tier 2 Breakdown", ln=True, fill=True)
         pdf.ln(5)
-        
+
+        # Group performance charts (same visuals as the dashboard).
+        if chart_images and (chart_images.get('group_traffic') or chart_images.get('group_sales')):
+            try:
+                import tempfile
+                try:
+                    from PIL import Image as PILImage
+                except Exception:
+                    PILImage = None
+                g_saved = {}
+                for gk in ('group_traffic', 'group_sales'):
+                    if chart_images.get(gk):
+                        chart_images[gk].seek(0)
+                        gt = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                        gt.write(chart_images[gk].read()); gt.close()
+                        g_saved[gk] = gt.name
+                        chart_images[gk].seek(0)
+                def _gh(path, w_mm):
+                    if PILImage is not None:
+                        try:
+                            with PILImage.open(path) as im:
+                                return w_mm * im.height / im.width
+                        except Exception:
+                            pass
+                    return w_mm * 0.7
+                hs = [_gh(p, 88) for p in g_saved.values()]
+                row_h = max(hs) if hs else 0
+                if row_h and pdf.get_y() + row_h > pdf.h - 15:
+                    pdf.add_page()
+                gy = pdf.get_y()
+                if g_saved.get('group_traffic'):
+                    pdf.image(g_saved['group_traffic'], x=15, y=gy, w=88)
+                if g_saved.get('group_sales'):
+                    pdf.image(g_saved['group_sales'], x=107, y=gy, w=88)
+                pdf.set_y(gy + row_h + 4)
+                for p in g_saved.values():
+                    try: os.remove(p)
+                    except Exception: pass
+            except Exception:
+                pass
+
         thead([(50, "Dealer Name"), (18, "Traffic"), (15, "VDPs"), (15, "Sold"),
                (15, "LTB"), (35, "Est. Rev Sold"), (35, "Pipeline Value")])
         
@@ -3368,6 +3465,8 @@ if st.session_state.current_report_id is not None:
 
     # Build the dashboard charts as images once, shared by the PDF and PPTX.
     chart_images = build_summary_chart_images(df, sold_df)
+    if dealer_group_export is not None and not dealer_group_export.empty:
+        chart_images.update(build_group_chart_images(dealer_group_export))
     metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors, 'context': report_ctx}
     export_missed_df = missed_df if not sold_df.empty else pd.DataFrame()
 
