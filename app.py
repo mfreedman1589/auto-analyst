@@ -690,12 +690,14 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         buf.seek(0)
         return pic
 
-    def _model_counts(frame, count_label):
+    def _model_counts(frame, count_label, top_n=10):
+        if frame is None or frame.empty:
+            return pd.DataFrame()
         f = frame.copy()
         f['Model_Only'] = f['Vehicle Name'].apply(normalize_model)
         counts = f['Model_Only'].value_counts().reset_index()
         counts.columns = ['Make/Model', count_label]
-        return counts[counts[count_label] > 1].head(10)
+        return counts[counts[count_label] > 1].head(top_n)
 
     def _fmt_money(v):
         try:
@@ -873,26 +875,52 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                      f"Est. Rev Sold: {_fmt_money(grow['Est. Rev Sold'])}   |   "
                      f"Pipeline: {_fmt_money(grow['Pipeline Value'])}",
                      12, NAVY, bold=True)
+            # Row 1: aggregated model roll-ups (mirrors the dashboard + PDF).
+            d_sold_models = _model_counts(d_sold, 'Units Sold') if not d_sold.empty else pd.DataFrame()
+            d_missed_models = _model_counts(d_missed, 'Missed Count') if not d_missed.empty else pd.DataFrame()
+            agg_bottom = 1.85
+            if not d_sold_models.empty:
+                add_text(sd, Inches(0.5), Inches(1.72), Inches(5.9), Inches(0.35),
+                         "Top Sold Models (>1 Unit)", 12, NAVY, bold=True)
+                rows = [["Make/Model", "Units"]] + [
+                    [str(r['Make/Model'])[:32], str(r['Units Sold'])]
+                    for _, r in d_sold_models.head(5).iterrows()]
+                add_table(sd, Inches(0.5), Inches(2.08), Inches(5.9), rows,
+                          [4.6, 1.3], font_size=9, row_h_in=0.27)
+                agg_bottom = max(agg_bottom, 2.08 + 0.27 * len(rows))
+            if not d_missed_models.empty:
+                add_text(sd, Inches(6.9), Inches(1.72), Inches(5.9), Inches(0.35),
+                         "Top Missed Models (>1 Unit)", 12, NAVY, bold=True)
+                rows = [["Make/Model", "Missed"]] + [
+                    [str(r['Make/Model'])[:32], str(r['Missed Count'])]
+                    for _, r in d_missed_models.head(5).iterrows()]
+                add_table(sd, Inches(6.9), Inches(2.08), Inches(5.9), rows,
+                          [4.6, 1.3], font_size=9, row_h_in=0.27)
+                agg_bottom = max(agg_bottom, 2.08 + 0.27 * len(rows))
+
+            # Row 2: vehicle-level detail (up to 8 rows, space permitting).
+            det_y = agg_bottom + 0.28
+            det_rows = 8 if det_y < 4.2 else 6
             if not d_sold.empty:
-                add_text(sd, Inches(0.5), Inches(1.85), Inches(5.9), Inches(0.4),
-                         "Top Sold Units", 13, NAVY, bold=True)
-                d_top = d_sold.sort_values('Attributed Unique Visitors', ascending=False).head(5)
+                add_text(sd, Inches(0.5), Inches(det_y), Inches(5.9), Inches(0.35),
+                         "Top Sold Units", 12, NAVY, bold=True)
+                d_top = d_sold.sort_values('Attributed Unique Visitors', ascending=False).head(det_rows)
                 rows = [["Vehicle", "Type", "Visits", "VIN"]] + [
                     [str(r['Vehicle Name'])[:24], str(r['Type']),
                      str(r['Attributed Unique Visitors']), str(r['VIN'])]
                     for _, r in d_top.iterrows()]
-                add_table(sd, Inches(0.5), Inches(2.25), Inches(5.9), rows,
-                          [2.3, 0.7, 0.7, 2.2], font_size=8)
+                add_table(sd, Inches(0.5), Inches(det_y + 0.36), Inches(5.9), rows,
+                          [2.3, 0.7, 0.7, 2.2], font_size=8, row_h_in=0.26)
             if not d_missed.empty:
-                add_text(sd, Inches(6.9), Inches(1.85), Inches(5.9), Inches(0.4),
-                         "Missed Opportunities (Watch List)", 13, NAVY, bold=True)
-                d_topm = d_missed.sort_values('Attributed Unique Visitors', ascending=False).head(5)
+                add_text(sd, Inches(6.9), Inches(det_y), Inches(5.9), Inches(0.35),
+                         "Missed Opportunities (Watch List)", 12, NAVY, bold=True)
+                d_topm = d_missed.sort_values('Attributed Unique Visitors', ascending=False).head(det_rows)
                 rows = [["Vehicle", "Type", "Visits", "VIN"]] + [
                     [str(r['Vehicle Name'])[:24], str(r['Type']),
                      str(r['Attributed Unique Visitors']), str(r['VIN'])]
                     for _, r in d_topm.iterrows()]
-                add_table(sd, Inches(6.9), Inches(2.25), Inches(5.9), rows,
-                          [2.3, 0.7, 0.7, 2.2], font_size=8)
+                add_table(sd, Inches(6.9), Inches(det_y + 0.36), Inches(5.9), rows,
+                          [2.3, 0.7, 0.7, 2.2], font_size=8, row_h_in=0.26)
 
     # --- Glossary & Methodology ---
     sg2 = new_slide("Glossary & Methodology")
