@@ -391,6 +391,69 @@ def normalize_model(name):
     return ' '.join(keep) if keep else s
 
 
+def build_report_context(min_visitors=1, report_month=None, unique_visitors=0,
+                         total_visits=0, scan_dt=None):
+    """
+    Optional reporting context for the dashboard and both exports:
+      header_meta    - compact one-liner for the title area (report month, scan
+                       date, lookback) — metadata, not a sentence
+      lookback_chip  - "24-day lookback" for tight spaces
+      threshold_line - footnote qualifying the KPI numbers
+      unique_visitors_fmt / avg_pages - engagement stats, displayed as figures
+    Missing inputs simply produce fewer keys.
+    """
+    ctx = {}
+    try:
+        if min_visitors and int(min_visitors) > 1:
+            ctx['threshold_line'] = (f"Based on vehicles that received {int(min_visitors)}+ "
+                                     f"unique visits from the Premion campaign.")
+        if scan_dt is None:
+            try:
+                scan_dt = datetime.datetime.now(pytz.timezone("US/Eastern"))
+            except Exception:
+                scan_dt = datetime.datetime.now()
+        ctx['scan_date'] = scan_dt.strftime("%B %d, %Y").replace(" 0", " ")
+        meta = []
+        if report_month:
+            y, mo = int(report_month[0]), int(report_month[1])
+            month_label = datetime.date(y, mo, 1).strftime("%B %Y")
+            month_start = datetime.date(y, mo, 1)
+            nxt = datetime.date(y + (mo == 12), (mo % 12) + 1, 1)
+            month_end = nxt - datetime.timedelta(days=1)
+            days_close = (scan_dt.date() - month_end).days
+            ctx['report_month'] = month_label
+            ctx['lookback_days'] = days_close
+            meta.append(f"{month_label} campaign")
+            if days_close >= 0:
+                ctx['lookback_chip'] = f"{days_close}-day lookback"
+                ctx['lookback_short'] = f"{days_close} days post-close"
+                ctx['lookback_help'] = (f"Days between the close of {month_label} and this "
+                                        f"inventory scan ({ctx['scan_date']}).")
+            else:
+                ctx['lookback_chip'] = "month in progress"
+                ctx['lookback_short'] = "Month in progress"
+        meta.append(f"scanned {ctx['scan_date']}")
+        if ctx.get('lookback_chip'):
+            meta.append(ctx['lookback_chip'])
+        ctx['header_meta'] = "  ·  ".join(meta)
+        if unique_visitors and int(unique_visitors) > 0:
+            uv = int(unique_visitors)
+            ctx['unique_visitors'] = uv
+            ctx['unique_visitors_fmt'] = f"{uv:,}"
+            tv = int(total_visits or 0)
+            if tv > 0:
+                avg = tv / uv
+                if 0 < avg < 1000:      # guard against a mistyped visitor count
+                    ctx['avg_pages'] = f"{avg:.1f}"
+                    ctx['total_visits_fmt'] = f"{tv:,}"
+    except Exception:
+        pass
+    return ctx
+
+def _ctx_has_engagement(metrics):
+    ctx = (metrics or {}).get('context') or {}
+    return bool(ctx.get('unique_visitors_fmt') and ctx.get('avg_pages'))
+
 def _fig_to_png_bytes(fig, w_in, h_in, tight=True):
     fig.set_size_inches(w_in, h_in)
     buf = io.BytesIO()
@@ -657,9 +720,11 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         report_date = datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%B %d, %Y").replace(" 0", " ")
     except Exception:
         report_date = datetime.datetime.now().strftime("%B %d, %Y")
-    add_text(s1, Inches(0.5), Inches(0.9), Inches(12.3), Inches(0.5),
-             f"Inventory Impact Report  |  {display_title}  |  {report_date}",
-             18, WHITE, bold=True)
+    add_text(s1, Inches(0.5), Inches(0.86), Inches(12.3), Inches(0.42),
+             f"Inventory Impact Report  |  {display_title}", 18, WHITE, bold=True)
+    ctx = (metrics or {}).get('context') or {}
+    add_text(s1, Inches(0.5), Inches(1.24), Inches(12.3), Inches(0.3),
+             ctx.get('header_meta') or report_date, 12, PERI)
     add_text(s1, Inches(0.5), Inches(1.75), Inches(12.3), Inches(0.5),
              "Complementary to your website attribution: the vehicles our audience "
              "shopped that have since moved off the lot.", 13, GREY, italic=True)
@@ -687,16 +752,32 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                  card_w, Inches(0.4),
                  f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
                  11, GREY, align=PP_ALIGN.CENTER)
-    add_text(s1, Inches(0.5), Inches(5.6), Inches(12.3), Inches(0.5),
+    if ctx.get('threshold_line'):
+        # Sits directly under the KPI cards: it qualifies those numbers.
+        add_text(s1, Inches(0.5), Inches(5.12), Inches(12.3), Inches(0.32),
+                 ctx['threshold_line'], 12, NAVY, align=PP_ALIGN.CENTER)
+    add_text(s1, Inches(0.5), Inches(5.62), Inches(12.3), Inches(0.5),
              "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion "
              "velocity of the inventory we advertised.", 12, GREY, italic=True,
              align=PP_ALIGN.CENTER)
     add_footer(s1)
 
-    # --- Slide 2: Traffic Mix (full-size) ---
+    # --- Slide 2: Traffic Mix (full-size) + engagement stats ---
     if chart_images.get('traffic'):
         s2 = new_slide("Traffic Mix: Where the Audience Shopped")
-        add_picture_fit(s2, chart_images['traffic'], 1.5, 1.5, 10.3, 4.9)
+        if _ctx_has_engagement(metrics):
+            add_picture_fit(s2, chart_images['traffic'], 0.4, 1.5, 9.0, 4.9)
+            stats = [("Unique Visitors", ctx.get('unique_visitors_fmt', '-')),
+                     ("Avg. Pages per Visitor", ctx.get('avg_pages', '-'))]
+            for n, (lab, val) in enumerate(stats):
+                cy = Inches(1.95) + Inches(1.85) * n
+                fill_rect(s2, Inches(9.75), cy, Inches(3.1), Inches(1.55), NAVY)
+                add_text(s2, Inches(9.75), cy + Inches(0.2), Inches(3.1), Inches(0.4),
+                         lab, 12, WHITE, align=PP_ALIGN.CENTER)
+                add_text(s2, Inches(9.75), cy + Inches(0.66), Inches(3.1), Inches(0.7),
+                         val, 30, WHITE, bold=True, align=PP_ALIGN.CENTER)
+        else:
+            add_picture_fit(s2, chart_images['traffic'], 1.5, 1.5, 10.3, 4.9)
         add_text(s2, Inches(0.5), Inches(6.45), Inches(12.3), Inches(0.5),
                  "VDP visits are high-intent inventory shoppers - the audience "
                  "most likely to buy.", 12, GREY, italic=True,
@@ -796,22 +877,22 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                 add_text(sd, Inches(0.5), Inches(1.85), Inches(5.9), Inches(0.4),
                          "Top Sold Units", 13, NAVY, bold=True)
                 d_top = d_sold.sort_values('Attributed Unique Visitors', ascending=False).head(5)
-                rows = [["Vehicle", "Type", "Visitors"]] + [
-                    [str(r['Vehicle Name'])[:34], str(r['Type']),
-                     str(r['Attributed Unique Visitors'])]
+                rows = [["Vehicle", "Type", "Visits", "VIN"]] + [
+                    [str(r['Vehicle Name'])[:24], str(r['Type']),
+                     str(r['Attributed Unique Visitors']), str(r['VIN'])]
                     for _, r in d_top.iterrows()]
                 add_table(sd, Inches(0.5), Inches(2.25), Inches(5.9), rows,
-                          [3.6, 0.9, 1.0], font_size=9)
+                          [2.3, 0.7, 0.7, 2.2], font_size=8)
             if not d_missed.empty:
                 add_text(sd, Inches(6.9), Inches(1.85), Inches(5.9), Inches(0.4),
                          "Missed Opportunities (Watch List)", 13, NAVY, bold=True)
                 d_topm = d_missed.sort_values('Attributed Unique Visitors', ascending=False).head(5)
-                rows = [["Vehicle", "Type", "Visitors"]] + [
-                    [str(r['Vehicle Name'])[:34], str(r['Type']),
-                     str(r['Attributed Unique Visitors'])]
+                rows = [["Vehicle", "Type", "Visits", "VIN"]] + [
+                    [str(r['Vehicle Name'])[:24], str(r['Type']),
+                     str(r['Attributed Unique Visitors']), str(r['VIN'])]
                     for _, r in d_topm.iterrows()]
                 add_table(sd, Inches(6.9), Inches(2.25), Inches(5.9), rows,
-                          [3.6, 0.9, 1.0], font_size=9)
+                          [2.3, 0.7, 0.7, 2.2], font_size=8)
 
     # --- Glossary & Methodology ---
     sg2 = new_slide("Glossary & Methodology")
@@ -887,7 +968,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.cell(0, 15, safe_str(report_title), ln=True, align="C")
     
     pdf.set_font("Arial", "I", 10)
-    pdf.cell(0, 8, f"Generated on: {current_time.strftime('%Y-%m-%d %I:%M %p ET')} | Attribution Threshold: {metrics.get('min_visitors', 1)}+ VDP Visitors", ln=True, align="C")
+    _ctx = (metrics or {}).get('context') or {}
+    pdf.cell(0, 8, safe_str(_ctx.get('header_meta')
+                            or f"Generated {current_time.strftime('%B %d, %Y').replace(' 0', ' ')}"),
+             ln=True, align="C")
     pdf.ln(5)
 
     pdf.set_font("Arial", "B", 14)
@@ -908,6 +992,10 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             except Exception: pass
             band_done = True
             pdf.ln(2)
+            if _ctx.get('threshold_line'):
+                pdf.set_font("Arial", "", 9)
+                pdf.set_text_color(10, 31, 92)
+                pdf.cell(0, 5, safe_str(_ctx['threshold_line']), ln=True, align="C")
             pdf.set_font("Arial", "I", 8)
             pdf.set_text_color(90, 90, 90)
             pdf.cell(0, 5, "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion velocity of the inventory we advertised.", ln=True, align="C")
@@ -924,6 +1012,12 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.set_font("Arial", "I", 10)
         pdf.cell(col_width, 6, "", border=0)
         pdf.cell(col_width, 6, f"(New: {metrics['new_ltb']}% | Used: {metrics['used_ltb']}%)", border=0, ln=True)
+    if _ctx.get('threshold_line') and not band_done:
+        pdf.ln(2)
+        pdf.set_font("Arial", "", 9)
+        pdf.set_text_color(10, 31, 92)
+        pdf.cell(0, 5, safe_str(_ctx['threshold_line']), ln=True, align="C")
+        pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
 
     section_offset = 0
@@ -951,6 +1045,25 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     sec_market = 2 + section_offset
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 10, f" {sec_market}. Market Insights", ln=True, fill=True)
+    if _ctx.get('unique_visitors_fmt') and _ctx.get('avg_pages'):
+        # Engagement stats as figures, not prose.
+        pdf.ln(3)
+        pdf.set_fill_color(10, 31, 92)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_x(15)
+        pdf.set_font("Arial", "B", 8)
+        pdf.cell(89, 6, "UNIQUE VISITORS", border=0, fill=True, align="C")
+        pdf.cell(2, 6, "", border=0)
+        pdf.cell(89, 6, "AVG. PAGES PER VISITOR", border=0, fill=True, align="C")
+        pdf.ln(6)
+        pdf.set_x(15)
+        pdf.set_font("Arial", "B", 15)
+        pdf.cell(89, 9, safe_str(_ctx['unique_visitors_fmt']), border=0, fill=True, align="C")
+        pdf.cell(2, 9, "", border=0)
+        pdf.cell(89, 9, safe_str(_ctx['avg_pages']), border=0, fill=True, align="C")
+        pdf.ln(12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_fill_color(240, 240, 240)
     pdf.ln(5)
 
     # Visual charts (matching the on-screen dashboard) embedded as images.
@@ -1592,6 +1705,11 @@ MC_CACHE_DAYS = _mc_setting_int("MARKETCHECK_CACHE_DAYS", 7)
 # run, halts immediately on zero progress, and the monthly cap always wins).
 # 1 = on (default), 0 = off (single-pass behavior).
 MC_AUTO_CONTINUE = _mc_setting_int("MARKETCHECK_AUTO_CONTINUE", 1)
+
+# Market lookups are for BLOCKED sites, not stragglers: a dealer only routes to
+# MarketCheck when at least this many of its vehicles couldn't be checked
+# directly. Healthy dealers with a few scan hiccups are left as-is.
+MC_MIN_UNRESOLVED = _mc_setting_int("MARKETCHECK_MIN_UNRESOLVED", 10)
 
 # Cars fetched per lookup. Free plan serves small pages regardless of what's
 # requested, so the safe default is 50. Basic honors larger pages — set
@@ -2345,6 +2463,34 @@ if uploaded_file is not None:
     run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
+# --- OPTIONAL REPORT DETAILS (lookback window + visitor engagement) ---
+with st.sidebar.expander("🗓️ Report Details (optional)", expanded=False):
+    st.caption("Adds the lookback window and visitor engagement stats to your dashboard "
+               "and downloads. Can be filled in before or after running the report.")
+    _today = datetime.date.today()
+    _month_opts = [None]
+    _y, _m = _today.year, _today.month
+    for _ in range(18):
+        _month_opts.append((_y, _m))
+        _m -= 1
+        if _m == 0:
+            _m = 12
+            _y -= 1
+    st.selectbox(
+        "Report month (campaign traffic period)",
+        options=_month_opts,
+        format_func=lambda v: ("— Not specified —" if v is None
+                               else datetime.date(v[0], v[1], 1).strftime("%B %Y")),
+        key="report_month_sel",
+        help="The month the uploaded traffic data covers. Used to calculate how long "
+             "the inventory had to move before this scan."
+    )
+    st.number_input(
+        "Total unique visitors (optional)",
+        min_value=0, step=1, key="unique_visitors_input",
+        help="From the Unified Dashboard. Enables the average pages-per-visitor stat."
+    )
+
 # --- ADD A DEALER TO THE VAULT (salesperson-friendly) ---
 with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
     st.caption("Only needed if a dealer's inventory won't scan on its own. Pick the easiest option that works.")
@@ -2540,6 +2686,17 @@ if run_analysis_clicked:
                 dom = urlparse(str(url)).netloc.replace('www.', '').lower()
                 mc_by_domain[dom].append((url, v))
 
+    # Blocked-site signature check: only dealers with MC_MIN_UNRESOLVED or more
+    # unchecked vehicles qualify — a handful of stragglers on an otherwise
+    # healthy site is scan noise, not a blocked website.
+    skipped_stragglers = sum(len(its) for d, its in mc_by_domain.items()
+                             if len(its) < MC_MIN_UNRESOLVED)
+    mc_by_domain = defaultdict(list, {d: its for d, its in mc_by_domain.items()
+                                      if len(its) >= MC_MIN_UNRESOLVED})
+    if skipped_stragglers:
+        st.caption(f"ℹ️ {skipped_stragglers} vehicle(s) on otherwise-healthy dealer sites "
+                   f"couldn't be checked and were left as-is (below the "
+                   f"{MC_MIN_UNRESOLVED}-vehicle threshold for market lookups).")
     if mc_by_domain:   # there are locked cars to try to rescue
         if not mc_key:
             st.info("A few dealers couldn't be scanned directly. To resolve them, "
@@ -2969,11 +3126,36 @@ if st.session_state.current_report_id is not None:
         missed_df = df[(df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= min_visitors)].sort_values('Attributed Unique Visitors', ascending=False).head(10)
 
     st.markdown("### 📊 Executive Summary")
+    _pre_ctx = build_report_context(
+        min_visitors=min_visitors,
+        report_month=st.session_state.get('report_month_sel'),
+        unique_visitors=st.session_state.get('unique_visitors_input', 0),
+        total_visits=int(df['Attributed Unique Visitors'].sum())
+    )
+    if _pre_ctx.get('header_meta'):
+        st.caption(_pre_ctx['header_meta'])
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Units Sold (Attributed)", m_units)
     m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
     m3.metric("Total Pipeline Value", f"${m_pipe:,.0f}")
     m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
+
+    # Optional reporting context (sidebar → "Report Details").
+    report_ctx = _pre_ctx
+    if report_ctx.get('threshold_line'):
+        st.caption(report_ctx['threshold_line'])
+    if report_ctx.get('unique_visitors_fmt'):
+        st.markdown("<br>", unsafe_allow_html=True)
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("Unique Visitors", report_ctx['unique_visitors_fmt'],
+                  help="Total unique visitors driven by the campaign (entered in Report Details).")
+        if report_ctx.get('avg_pages'):
+            e2.metric("Avg. Pages per Visitor", report_ctx['avg_pages'],
+                      delta=f"{report_ctx.get('total_visits_fmt','')} total page visits",
+                      delta_color="off")
+        if report_ctx.get('lookback_short'):
+            e3.metric("Lookback Window", report_ctx['lookback_short'],
+                      help=report_ctx.get('lookback_help', ''))
 
     st.divider()
 
@@ -3158,7 +3340,7 @@ if st.session_state.current_report_id is not None:
 
     # Build the dashboard charts as images once, shared by the PDF and PPTX.
     chart_images = build_summary_chart_images(df, sold_df)
-    metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors}
+    metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors, 'context': report_ctx}
     export_missed_df = missed_df if not sold_df.empty else pd.DataFrame()
 
     ex1, ex2, ex3, ex4 = st.columns(4)
