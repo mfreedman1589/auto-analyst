@@ -2171,6 +2171,8 @@ def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None
     dealers whose VDP links carry page IDs instead of VINs.
     """
     def _harvest(listings, vins, urls):
+        """urls is a {normalized_vdp_url: vin} map so a URL match can also
+        recover the real VIN for dealers whose links don't carry one."""
         for lst in listings:
             v = str(lst.get("vin", "")).upper().strip()
             if v:
@@ -2180,14 +2182,14 @@ def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None
                 if u:
                     n = normalize_vdp_url(u)
                     if n:
-                        urls.add(n)
+                        urls[n] = v if is_plausible_vin(v) else urls.get(n)
                     break
 
     nf, listings = _mc_request(domain, api_key, session, year=year, year_range=year_range,
                                car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=0)
     if nf is None:
-        return (set(), False, None, set())
-    vins, urls = set(), set()
+        return (set(), False, None, {})
+    vins, urls = set(), {}
     _harvest(listings, vins, urls)
     if nf > MC_PAGE_CAP:
         return (vins, False, nf, urls)   # over cap -> caller sub-slices
@@ -2218,7 +2220,15 @@ def _mc_apply_by_url(out, items, url_set, min_match_rate=0.2):
     if rate < min_match_rate:
         return None
     for u, n in normed:
-        out[u] = "Available" if (n and n in url_set) else "SOLD (Not in Market Inventory)"
+        if n and n in url_set:
+            out[u] = "Available"
+            # Recover the real VIN from the matched listing (these dealers'
+            # links don't contain one).
+            real = url_set.get(n) if isinstance(url_set, dict) else None
+            if real and is_plausible_vin(real):
+                HARVESTED_VINS[url_key(u)] = real
+        else:
+            out[u] = "SOLD (Not in Market Inventory)"
     return rate
 
 def _mc_apply(out, items, vin_set, complete):
