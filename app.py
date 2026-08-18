@@ -1569,16 +1569,54 @@ def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
+# ISO 3779 VIN check-digit transliteration (position 9 validates the whole VIN).
+_VIN_TRANS = {**{str(d): d for d in range(10)},
+              **dict(zip("ABCDEFGHJKLMNPRSTUVWXYZ",
+                         [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 7, 9, 2, 3, 4, 5, 6, 7, 8, 9]))}
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+def vin_check_digit_ok(vin):
+    """True if the VIN satisfies the North American check digit (position 9)."""
+    try:
+        vin = str(vin).upper()
+        if len(vin) != 17 or re.search(r'[IOQ]', vin):
+            return False
+        total = sum(_VIN_TRANS[c] * _VIN_WEIGHTS[i] for i, c in enumerate(vin))
+        rem = total % 11
+        return vin[8] == ("X" if rem == 10 else str(rem))
+    except Exception:
+        return False
+
+def is_plausible_vin(candidate):
+    """
+    Guards against 17-char slices of hex page IDs (some dealer platforms use
+    32-char GUIDs in VDP URLs, e.g. .../2024-Acura-MDX-Macon-0b4e...b630.htm).
+    Such a slice looks VIN-shaped but is not a VIN, and treating it as one
+    makes every vehicle look SOLD. Accept only if the candidate passes the
+    check digit, or contains a letter that hex IDs cannot have (G-Z except
+    I/O/Q). Real VINs satisfy at least one of these; GUID slices satisfy
+    neither.
+    """
+    c = str(candidate).upper()
+    if len(c) != 17 or re.search(r'[IOQ]', c) or not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', c):
+        return False
+    if vin_check_digit_ok(c):
+        return True
+    return bool(re.search(r'[G-HJ-NP-Z]', c))   # non-hex letter => not a hex ID
+
 def extract_vin(url):
     try:
         path = urlparse(str(url)).path.upper().strip('/')
         match = re.search(r'(?:^|[-/])([A-HJ-NPR-Z0-9]{17})(?:[-/\.]|$)', path)
-        if match: return match.group(1)
-        # Fallback: only accept a real 17-char VIN (excludes I/O/Q). A shorter
-        # token is NOT a VIN — grabbing it would cause false "SOLD" results, so
-        # we return N/A and let the year-based logic handle it instead.
-        blocks = re.findall(r'[A-HJ-NPR-Z0-9]{17}', path)
-        if blocks: return blocks[-1]
+        if match and is_plausible_vin(match.group(1)):
+            return match.group(1)
+        # Fallback: only standalone 17-char tokens, and only if they look like
+        # real VINs. A slice out of a longer alphanumeric run (page GUID) is
+        # NOT a VIN — grabbing it would cause false "SOLD" results, so we
+        # return N/A and let the year-based logic handle it instead.
+        for token in re.split(r'[^A-HJ-NPR-Z0-9]+', path):
+            if len(token) == 17 and is_plausible_vin(token):
+                return token
         return "N/A"
     except:
         return "N/A"
@@ -2976,6 +3014,34 @@ if run_analysis_clicked:
     df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
     df['VIN'] = df['Page Url'].apply(extract_vin)
     df['Type'] = df['Page Url'].apply(extract_type)
+
+    # --- SANITY GUARD (data quality only): if nearly everything reads SOLD AND
+    # we couldn't read real VINs off this dealer's pages, the matching itself
+    # failed (e.g. a site whose VDP URLs carry page IDs rather than VINs) and
+    # the "sales" are false. Withhold those.
+    # NOTE: a high sold rate on its own is NOT an error — an older report
+    # naturally shows most cars sold. That case is handled by a dismissible
+    # advisory in the results view, and the data is left intact.
+    try:
+        _checked = df[df['Sold_Status'].astype(str).str.match(r'SOLD|Available')]
+        _dom_of = lambda u: urlparse(str(u)).netloc.replace('www.', '').lower()
+        for _dom, _grp in _checked.groupby(df['Page Url'].apply(_dom_of)):
+            if len(_grp) < 10:
+                continue
+            _sold_rate = _grp['Sold_Status'].astype(str).str.startswith('SOLD').mean()
+            _bad_vins = (_grp['Page Url'].apply(extract_vin) == 'N/A').mean()
+            if _sold_rate >= 0.9 and _bad_vins > 0.5:
+                _idx = df['Page Url'].apply(_dom_of) == _dom
+                df.loc[_idx & df['Is Sold'], 'Sold_Status'] = 'ERROR (Verification Failed)'
+                df.loc[_idx, 'Is Sold'] = False
+                st.error(f"⚠️ **Results withheld for {_dom}.** {int(_sold_rate * 100)}% of "
+                         f"shopped vehicles came back as sold, and this dealer's vehicle "
+                         f"pages don't publish VINs we can match — so those \"sales\" can't "
+                         f"be verified. They're marked unverified rather than sold, so "
+                         f"nothing incorrect reaches a client. Please spot-check a few VDP "
+                         f"links and report this dealer so we can add support for it.")
+    except Exception:
+        pass
     
     vdp_mask = df['Category'] == 'VDP'
     df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
@@ -3100,10 +3166,58 @@ if st.session_state.history:
                            "in the millions means that filter is being ignored.")
 
 # --- MAIN DASHBOARD DISPLAY ---
+def dismissible_notice(notice_key, body, icon="🗓️"):
+    """
+    On-screen advisory the rep can close. Never written into the PDF/PPTX —
+    this is guidance for reading the report, not a finding about the dealer.
+    """
+    flag = f"_dismissed_{notice_key}"
+    if st.session_state.get(flag):
+        return
+    box = st.container()
+    with box:
+        col_msg, col_x = st.columns([30, 1])
+        with col_msg:
+            st.warning(f"{icon} {body}")
+        with col_x:
+            if st.button("✕", key=f"_dismiss_btn_{notice_key}", help="Dismiss this note"):
+                st.session_state[flag] = True
+                st.rerun()
+
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
+
+    # --- LOOKBACK ADVISORY (screen only, dismissible) ---
+    # A long gap between the campaign month and the scan naturally pushes most
+    # vehicles into "sold" — the report is still accurate, it just proves less.
+    try:
+        _rid = str(st.session_state.current_report_id)
+        _months_back = None
+        _rm = st.session_state.get('report_month_sel')
+        if _rm:
+            _now = datetime.datetime.now(eastern).date()
+            _months_back = ((_now.year - int(_rm[0])) * 12 + (_now.month - int(_rm[1])))
+        _vdp_rows = df[df['Sold_Status'].astype(str).str.match(r'SOLD|Available')]
+        _sold_share = (_vdp_rows['Sold_Status'].astype(str).str.startswith('SOLD').mean()
+                       if len(_vdp_rows) >= 10 else None)
+        if _months_back is not None and _months_back > 3:
+            dismissible_notice(
+                f"lookback_{_rid}",
+                f"**Long lookback window ({_months_back} months).** Over a window this "
+                f"long most inventory turns over anyway, so a high sold count says less "
+                f"about campaign impact. Consider raising the **VDP filter** to focus on "
+                f"the highest-demand vehicles our campaign actually drove traffic to.")
+        elif _sold_share is not None and _sold_share >= 0.9:
+            dismissible_notice(
+                f"soldrate_{_rid}",
+                f"**{int(_sold_share * 100)}% of shopped vehicles came back sold.** If this "
+                f"report covers a campaign month that closed a while ago, that's expected — "
+                f"inventory turns over. Double-check the report period, and consider raising "
+                f"the **VDP filter** so the story centers on the highest-demand vehicles.")
+    except Exception:
+        pass
     
     # 1. IN-APP ACTION CENTER FOR INVENTORY SYNC
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
