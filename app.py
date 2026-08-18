@@ -1736,6 +1736,76 @@ from collections import defaultdict
 # no 1,000-record pagination ceiling. Runs on algolia.net, never the firewall.
 # ======================================================================
 
+# Real VINs discovered during the scan (for dealers whose URLs don't carry one).
+HARVESTED_VINS = {}
+
+def url_key(url):
+    """
+    The identifying token from a VDP link, for dealers whose URLs carry a page
+    ID instead of a VIN (e.g. .../2024-Acura-MDX-Macon-0b4e4a42ac18...b630.htm
+    -> '0b4e4a42ac184abdfb3c758d6119b630'). Falls back to the last path slug.
+    """
+    try:
+        path = urlparse(str(url)).path.rstrip('/')
+        slug = re.sub(r'\.html?$', '', path.split('/')[-1])
+        m = re.findall(r'[0-9a-fA-F]{16,}', slug)
+        if m:
+            return m[-1]
+        return slug
+    except Exception:
+        return ""
+
+def resolve_algolia_keys(domain, cfg, keys, session):
+    """
+    Resolve VIN-less vehicles against the dealer's own Algolia index using the
+    page ID from each VDP link. Returns (status_map, vin_map).
+    If EVERY key comes back with no hits, the index likely doesn't search that
+    field — we return nothing so the caller falls through to the MarketCheck
+    URL match rather than declaring live cars sold.
+    """
+    app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
+    headers = {
+        "x-algolia-application-id": app_id,
+        "x-algolia-api-key": api_key,
+        "Content-Type": "application/json",
+        "Referer": f"https://www.{domain}/",
+        "Origin": f"https://www.{domain}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    }
+    status, vins_found = {}, {}
+    keys = [k for k in keys if k]
+    BATCH = 50
+    try:
+        for i in range(0, len(keys), BATCH):
+            chunk = keys[i:i + BATCH]
+            body = {"requests": [
+                {"indexName": index_name, "params": f"query={k}&hitsPerPage=1"}
+                for k in chunk
+            ]}
+            r = session.post(endpoint, headers=headers, json=body, timeout=15)
+            if r.status_code != 200:
+                break
+            for k, res in zip(chunk, r.json().get("results", [])):
+                hits = res.get("hits", []) or []
+                if res.get("nbHits", 0) > 0:
+                    status[k] = "Available"
+                    for h in hits[:1]:
+                        for f in ("vin", "VIN", "objectID"):
+                            cand = str(h.get(f, "")).upper().strip()
+                            if is_plausible_vin(cand):
+                                vins_found[k] = cand
+                                break
+                else:
+                    status[k] = "SOLD (Not in Dealer Database)"
+    except Exception:
+        pass
+    # Nothing matched at all -> the page ID isn't searchable in this index.
+    if status and not any(v == "Available" for v in status.values()):
+        return ({}, {})
+    return (status, vins_found)
+
 def resolve_algolia_vins(domain, cfg, vins, session):
     """
     Resolve a list of VINs for one store via batched Algolia multi-queries.
@@ -2075,36 +2145,81 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
             session.last_error = f"response error: {type(e).__name__}: {str(e)[:140]}"
         return (None, None)
 
+def normalize_vdp_url(url):
+    """
+    Canonical form of a VDP link for matching our report URLs against the
+    dealer's live listings: host without www, lowercase path, no query string,
+    no trailing slash or .htm/.html suffix.
+    """
+    try:
+        p = urlparse(str(url).strip().lower())
+        host = p.netloc.replace("www.", "")
+        path = re.sub(r'\.html?$', '', p.path.rstrip('/'))
+        if not host and not path:
+            return ""
+        return f"{host}{path}"
+    except Exception:
+        return ""
+
 def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None):
     """
-    Pull a slice's VINs, paging in 50s. Aborts early (no paging) if the slice is
-    over the free-tier cap, so an over-cap slice costs ONE call, not ten.
-    Returns (vin_set, complete, num_found): complete means we got the whole slice
-    (so an absent VIN is genuinely sold); num_found is the slice's total.
+    Pull a slice's VINs (and the dealer VDP URLs on those listings), paging in
+    MC_PAGE_SIZE steps. Aborts early (no paging) if the slice is over the
+    free-tier cap, so an over-cap slice costs ONE call, not ten.
+    Returns (vin_set, complete, num_found, url_set): complete means we got the
+    whole slice (so an absent vehicle is genuinely sold). url_set lets us match
+    dealers whose VDP links carry page IDs instead of VINs.
     """
+    def _harvest(listings, vins, urls):
+        for lst in listings:
+            v = str(lst.get("vin", "")).upper().strip()
+            if v:
+                vins.add(v)
+            for key in ("vdp_url", "vdp_url_full", "url"):
+                u = lst.get(key)
+                if u:
+                    n = normalize_vdp_url(u)
+                    if n:
+                        urls.add(n)
+                    break
+
     nf, listings = _mc_request(domain, api_key, session, year=year, year_range=year_range,
                                car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=0)
     if nf is None:
-        return (set(), False, None)
-    vins = set()
-    for lst in listings:
-        v = str(lst.get("vin", "")).upper().strip()
-        if v:
-            vins.add(v)
+        return (set(), False, None, set())
+    vins, urls = set(), set()
+    _harvest(listings, vins, urls)
     if nf > MC_PAGE_CAP:
-        return (vins, False, nf)   # over cap -> caller sub-slices; don't waste pages
+        return (vins, False, nf, urls)   # over cap -> caller sub-slices
     start = len(listings)
     while start < nf and start < MC_PAGE_CAP:
         nf2, more = _mc_request(domain, api_key, session, year=year, year_range=year_range,
                                 car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=start)
         if nf2 is None or not more:
             break
-        for lst in more:
-            v = str(lst.get("vin", "")).upper().strip()
-            if v:
-                vins.add(v)
+        _harvest(more, vins, urls)
         start += len(more)
-    return (vins, start >= nf, nf)
+    return (vins, start >= nf, nf, urls)
+
+def _mc_apply_by_url(out, items, url_set, min_match_rate=0.2):
+    """
+    Resolve vehicles by matching their VDP link against the dealer's live
+    listings — for sites whose URLs carry page IDs instead of VINs.
+    A match rate below min_match_rate means the two URL formats don't line up
+    (MarketCheck may publish a different link style), so we resolve NOTHING
+    rather than risk declaring live cars sold. Returns the match rate, or None
+    if the attempt was rejected.
+    """
+    if not url_set or not items:
+        return None
+    normed = [(u, normalize_vdp_url(u)) for u, _v in items]
+    hits = sum(1 for _u, n in normed if n and n in url_set)
+    rate = hits / max(len(normed), 1)
+    if rate < min_match_rate:
+        return None
+    for u, n in normed:
+        out[u] = "Available" if (n and n in url_set) else "SOLD (Not in Market Inventory)"
+    return rate
 
 def _mc_apply(out, items, vin_set, complete):
     """Assign Available/Sold to report items from a pulled slice."""
@@ -2123,7 +2238,7 @@ def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0, p
     (filter ignored by the data), so calls are never wasted on useless recursion.
     Returns (vin_set, complete).
     """
-    vins, complete, nf = _mc_pull(domain, api_key, session, year=year,
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year=year,
                                   car_type=car_type, price_range=f"{lo}-{hi}")
     if nf is None:
         return (set(), False)
@@ -2144,7 +2259,7 @@ MC_PRICE_BANDS = [(0, 45000), (45000, 60000), (60000, 80000), (80000, 100000000)
 
 def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
     """Resolve one model year; if over the cap, split by car_type, then by price."""
-    vins, complete, nf = _mc_pull(domain, api_key, session, year=year)
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year=year)
     if nf is None:
         return
     if complete:
@@ -2154,7 +2269,7 @@ def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
     merged = set(vins)
     all_complete = True
     for ct in ("new", "used", "certified"):
-        vs, cp, nf2 = _mc_pull(domain, api_key, session, year=year, car_type=ct)
+        vs, cp, nf2, _u2 = _mc_pull(domain, api_key, session, year=year, car_type=ct)
         if nf2 is None:
             all_complete = False
             continue
@@ -2180,7 +2295,7 @@ def _mc_band(domain, api_key, session, band_items, out):
         return
     years = [y for _, _, y in band_items]
     lo, hi = min(years), max(years)
-    vins, complete, nf = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
     if nf is None:
         return
     if complete:
@@ -2273,7 +2388,7 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None, out=None):
     valid = []
     for u, v, _y in items:
         vv = str(v or "").upper().strip()
-        if len(vv) == 17:
+        if is_plausible_vin(vv):     # never spend a lookup on a page-ID slice
             valid.append((u, vv))
     if not valid:
         return out
@@ -2349,9 +2464,24 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
     # (proven in production 7/20: exact match to baseline) is the fallback for
     # errors, unfiltered-looking responses, and whatever a partial pull left.
     if MC_ENDPOINT == _MC_DEFAULT_ENDPOINT:
-        vins_s, complete_s, nf_s = _mc_pull(domain, api_key, session)
+        vins_s, complete_s, nf_s, urls_s = _mc_pull(domain, api_key, session)
+        # Does this report even have VINs to match on? Some dealer platforms
+        # publish page IDs instead (e.g. .../2024-Acura-MDX-Macon-0b4e...b630.htm).
+        _usable_vins = sum(1 for _u, v, _y in items if is_plausible_vin(v))
+        _vinless = _usable_vins < max(1, int(len(items) * 0.5))
         if nf_s is not None and 0 <= nf_s <= 25000:
             if complete_s:
+                if _vinless:
+                    # No VINs on our side: match on the dealer's own VDP links.
+                    rate = _mc_apply_by_url(out, [(u, v) for u, v, _ in items], urls_s)
+                    if rate is not None:
+                        return out
+                    if hasattr(session, "last_error"):
+                        session.last_error = (
+                            f"{domain}: no VINs in the report URLs and the live listing "
+                            f"links didn't match either - left unresolved rather than "
+                            f"guessing")
+                    return out
                 if cache_out is not None:
                     cache_out[domain] = {"active": set(vins_s), "absent": set(),
                                          "complete": True}
@@ -2374,7 +2504,7 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
                          cache_out=cache_out, out=out)
         return out
     # Try the whole store; if it's over the cap this aborts after one call.
-    vins, complete, nf = _mc_pull(domain, api_key, session)
+    vins, complete, nf, urls_s = _mc_pull(domain, api_key, session)
     if nf is None:
         return out
     if nf > 25000:
@@ -2385,6 +2515,13 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
                                   f"(num_found={nf}) — dealer left unresolved")
         return out
     if complete:
+        _usable = sum(1 for _u, v, _y in items if is_plausible_vin(v))
+        if _usable < max(1, int(len(items) * 0.5)):
+            rate = _mc_apply_by_url(out, [(u, v) for u, v, _ in items], urls_s)
+            if rate is None and hasattr(session, "last_error"):
+                session.last_error = (f"{domain}: no VINs in the report URLs and the live "
+                                      f"listing links didn't match either - left unresolved")
+            return out
         if cache_out is not None:
             cache_out[domain] = {"active": set(vins), "absent": set(),
                                  "complete": True}
@@ -2425,6 +2562,7 @@ def build_all_vin_status(vdp_urls, session):
     each store's VINs in batches (concurrently). Returns {domain: {vin: status}}.
     """
     by_domain = defaultdict(set)
+    by_domain_keys = defaultdict(set)   # VIN-less vehicles, keyed by page ID
     for u in vdp_urls:
         d = urlparse(str(u)).netloc.replace('www.', '').lower()
         cfg = DEALER_API_VAULT.get(d)
@@ -2433,7 +2571,17 @@ def build_all_vin_status(vdp_urls, session):
             v = extract_vin(u)
             if v != "N/A":
                 by_domain[d].add(v)
+            else:
+                by_domain_keys[d].add(url_key(u))
     status = {}
+    for d, keys in by_domain_keys.items():
+        try:
+            kstat, kvins = resolve_algolia_keys(d, DEALER_API_VAULT[d], keys, session)
+            if kstat:
+                status.setdefault(d, {}).update(kstat)
+                HARVESTED_VINS.update(kvins)
+        except Exception:
+            pass
     if not by_domain:
         return status
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(by_domain))) as ex:
@@ -2442,9 +2590,9 @@ def build_all_vin_status(vdp_urls, session):
         for fut in concurrent.futures.as_completed(futs):
             d = futs[fut]
             try:
-                status[d] = fut.result()
+                status.setdefault(d, {}).update(fut.result())
             except Exception:
-                status[d] = {}
+                status.setdefault(d, {})
     return status
 
 def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
@@ -2480,11 +2628,17 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
             return "ERROR (Inventory Unavailable)"
 
     vin = extract_vin(url)
+    pre = (vin_status or {}).get(domain)
     if vin == "N/A":
+        # No VIN in the link: the bulk pre-pass may have resolved this vehicle
+        # by its page ID against the dealer's own index. If not, leave it for
+        # the MarketCheck URL match rather than guessing.
+        k = url_key(url)
+        if pre and k in pre:
+            return pre[k]
         return "ERROR (Inventory Unavailable)"
 
     # Resolved in bulk by the pre-pass?
-    pre = (vin_status or {}).get(domain)
     if pre and vin in pre:
         return pre[vin]
 
@@ -2845,9 +2999,11 @@ if run_analysis_clicked:
     for url, res in vdp_results.items():
         if str(res).startswith("ERROR") and "No VIN" not in str(res):
             v = extract_vin(url)
-            if v != "N/A":
-                dom = urlparse(str(url)).netloc.replace('www.', '').lower()
-                mc_by_domain[dom].append((url, v))
+            # Vehicles without a readable VIN are still included: dealers whose
+            # VDP links carry page IDs instead of VINs are resolved by matching
+            # those links against the live listings (see _mc_apply_by_url).
+            dom = urlparse(str(url)).netloc.replace('www.', '').lower()
+            mc_by_domain[dom].append((url, v))
 
     # Blocked-site signature check: only dealers with MC_MIN_UNRESOLVED or more
     # unchecked vehicles qualify — a handful of stragglers on an otherwise
@@ -3012,7 +3168,8 @@ if run_analysis_clicked:
     
     df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
     df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
-    df['VIN'] = df['Page Url'].apply(extract_vin)
+    df['VIN'] = df['Page Url'].apply(
+        lambda u: HARVESTED_VINS.get(url_key(u)) or extract_vin(u))
     df['Type'] = df['Page Url'].apply(extract_type)
 
     # --- SANITY GUARD (data quality only): if nearly everything reads SOLD AND
