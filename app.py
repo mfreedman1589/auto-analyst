@@ -2214,19 +2214,32 @@ def _mc_apply_by_url(out, items, url_set, min_match_rate=0.2):
     """
     if not url_set or not items:
         return None
-    normed = [(u, normalize_vdp_url(u)) for u, _v in items]
-    hits = sum(1 for _u, n in normed if n and n in url_set)
+    # Match on the page ID rather than the whole path: these sites serve the
+    # SAME vehicle under several slugs (.../2025-Honda-Pilot-Macon-<id> and
+    # .../2025-Honda-Pilot-Macon-Georgia-<id>), and MarketCheck publishes only
+    # one of them. Full-path matching marked the other variant sold.
+    id_map = {}
+    for n, v in (url_set.items() if isinstance(url_set, dict)
+                 else ((x, None) for x in url_set)):
+        k = url_key(n)
+        if k:
+            id_map[k] = v if v else id_map.get(k)
+    normed = [(u, url_key(u), normalize_vdp_url(u)) for u, _v in items]
+    hits = sum(1 for _u, k, n in normed
+               if (k and k in id_map) or (n and n in url_set))
     rate = hits / max(len(normed), 1)
     if rate < min_match_rate:
         return None
-    for u, n in normed:
-        if n and n in url_set:
+    for u, k, n in normed:
+        matched = (k and k in id_map) or (n and n in url_set)
+        if matched:
             out[u] = "Available"
             # Recover the real VIN from the matched listing (these dealers'
             # links don't contain one).
-            real = url_set.get(n) if isinstance(url_set, dict) else None
+            real = id_map.get(k) if k in id_map else (
+                url_set.get(n) if isinstance(url_set, dict) else None)
             if real and is_plausible_vin(real):
-                HARVESTED_VINS[url_key(u)] = real
+                HARVESTED_VINS[k or url_key(u)] = real
         else:
             out[u] = "SOLD (Not in Market Inventory)"
     return rate
@@ -2646,7 +2659,10 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
         k = url_key(url)
         if pre and k in pre:
             return pre[k]
-        return "ERROR (Inventory Unavailable)"
+        # Nothing from the dealer's index: check the page itself. These sites
+        # are usually publicly readable even when their API isn't useful, and a
+        # live page (or a 404/redirect) is better evidence than any lookup.
+        return check_universal_status(url, session)
 
     # Resolved in bulk by the pre-pass?
     if pre and vin in pre:
