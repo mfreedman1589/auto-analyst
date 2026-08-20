@@ -2964,6 +2964,43 @@ if run_analysis_clicked:
     
     url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
+
+    # Visits column: the Unified Dashboard exports "Attributed Unique Visitors",
+    # but merged/rebuilt files often use another header ("Unique Visits" etc.).
+    # Detect it by name, then fall back to the first numeric column.
+    if 'Attributed Unique Visitors' not in df_raw.columns:
+        _visit_col = None
+        _aliases = ['unique visits', 'unique visitors', 'attributed unique visits',
+                    'attributed visitors', 'attributed visits', 'visits', 'visitors',
+                    'total visits', 'sessions', 'unique page visits', 'page views']
+        _lookup = {str(c).strip().lower(): c for c in df_raw.columns}
+        for _a in _aliases:
+            if _a in _lookup:
+                _visit_col = _lookup[_a]
+                break
+        if _visit_col is None:
+            for _c in df_raw.columns:
+                if _c == 'Page Url':
+                    continue
+                _test = pd.to_numeric(
+                    df_raw[_c].astype(str).str.replace(r'[,\s]', '', regex=True),
+                    errors='coerce')
+                if _test.notna().sum() >= max(1, int(len(df_raw) * 0.8)):
+                    _visit_col = _c
+                    break
+        if _visit_col is None:
+            st.error("❌ Couldn't find a visits column in this CSV. Expected "
+                     "**Attributed Unique Visitors** (or Unique Visits / Visitors). "
+                     f"Columns found: {', '.join(str(c) for c in df_raw.columns)}")
+            st.stop()
+        df_raw.rename(columns={_visit_col: 'Attributed Unique Visitors'}, inplace=True)
+        if str(_visit_col) != 'Attributed Unique Visitors':
+            st.caption(f"Using **{_visit_col}** as the visits column.")
+
+    # Numbers may carry thousands separators or come from projected/merged data.
+    df_raw['Attributed Unique Visitors'] = pd.to_numeric(
+        df_raw['Attributed Unique Visitors'].astype(str).str.replace(r'[,\s]', '', regex=True),
+        errors='coerce').fillna(0).round().astype(int)
     
     df_raw = df_raw.dropna(subset=['Page Url'])
     df_raw = df_raw[df_raw['Page Url'].astype(str).str.strip() != '']
