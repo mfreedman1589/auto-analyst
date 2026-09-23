@@ -2980,6 +2980,44 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
     return "ERROR (Inventory Unavailable)"
 
 # --- THE UNIVERSAL VISUAL SCRAPER ---------------------------------------
+# VIN markers on a VDP, most authoritative first. A page usually repeats its
+# own vehicle's VIN in several of these; "similar vehicles" blocks mention
+# other VINs once or twice, so frequency breaks ties in the fallback.
+_VIN_PATTERNS = [
+    r'vehicleIdentificationNumber["\']?\s*[:=]\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'data-vin\s*=\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'["\']vin["\']\s*:\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'\bVIN\b[\s:#]*([A-HJ-NPR-Z0-9]{17})\b',
+]
+
+def harvest_vin_from_html(text, soup=None):
+    """
+    Pull the vehicle's VIN out of a VDP's HTML. Used for dealer platforms whose
+    URLs carry a page ID instead of a VIN, so the report can still show one.
+    Returns a validated VIN or None — never a guess.
+    """
+    try:
+        for pat in _VIN_PATTERNS:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                cand = m.group(1).upper()
+                if is_plausible_vin(cand):
+                    return cand
+        # Fallback: the most-repeated plausible VIN on the page, which is the
+        # page's own vehicle. A single lone hit is accepted; a tie is not.
+        counts = {}
+        for m in re.finditer(r'\b([A-HJ-NPR-Z0-9]{17})\b', text.upper()):
+            c = m.group(1)
+            if is_plausible_vin(c):
+                counts[c] = counts.get(c, 0) + 1
+        if not counts:
+            return None
+        ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            return ranked[0][0]
+    except Exception:
+        pass
+    return None
+
 def check_universal_status(url, session):
     url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
@@ -3025,6 +3063,14 @@ def check_universal_status(url, session):
         text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
+
+        # This dealer's links don't carry a VIN: take it off the page itself so
+        # the report can still show one. Done before the status checks so a
+        # vehicle sold behind an "out of stock" overlay gets its VIN too.
+        if vin == "N/A":
+            found_vin = harvest_vin_from_html(text, soup)
+            if found_vin:
+                HARVESTED_VINS[url_key(url)] = found_vin
         
         # --- SOFT-SOLD / OVERLAY / JSON SCANNER ---
         soft_sold_phrases = [
