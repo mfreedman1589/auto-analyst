@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import json
 import re
 import concurrent.futures
 import plotly.express as px
@@ -622,6 +623,285 @@ def build_kpi_band_image(metrics):
         return buf
     except Exception:
         return None
+
+FACTS_SCHEMA_VERSION = 1
+APP_BUILD = "2026.09.23"   # bump on release; surfaced in the facts export
+
+# Makes whose names are more than one word, so "make" can be split off the
+# front of a normalized vehicle name correctly.
+MULTIWORD_MAKES = [
+    "MERCEDES BENZ", "LAND ROVER", "ALFA ROMEO", "ASTON MARTIN", "ROLLS ROYCE",
+    "GENERAL MOTORS",
+]
+
+# Raw-slug make spellings -> the canonical form used for cross-source matching.
+MAKE_ALIASES = {
+    "MERCEDES BENZ": "MERCEDES-BENZ",
+    "LAND ROVER": "LAND ROVER",
+    "ALFA ROMEO": "ALFA ROMEO",
+    "ROLLS ROYCE": "ROLLS-ROYCE",
+    "ASTON MARTIN": "ASTON MARTIN",
+    "CHEVY": "CHEVROLET",
+    "VW": "VOLKSWAGEN",
+    "MAZDA": "MAZDA",
+    "GMC": "GMC",
+    "BMW": "BMW",
+}
+
+def canonical_model(model_text):
+    """
+    Canonical model string for matching against Polk registrations and website
+    page names: uppercase, single-spaced, and short alpha+numeric series
+    hyphenated the way the industry writes them ("F 150" -> "F-150",
+    "CX 5" -> "CX-5"). Longer words keep their space ("MODEL 3" stays).
+    """
+    s = re.sub(r'\s+', ' ', str(model_text or "")).strip().upper()
+    if not s:
+        return None
+    s = re.sub(r'\b([A-Z]{1,2}) (\d{2,4}[A-Z]{0,2})\b', r'\1-\2', s)
+    return s
+
+def split_make_model(vehicle_name):
+    """
+    ('FORD', 'F-150', 'Ford F 150 Lariat 4Wd') from a report vehicle name.
+    Uses normalize_model first so trims/drivetrain are already stripped.
+    Returns (make, model, raw_normalized) with None where unknown.
+    """
+    raw = normalize_model(vehicle_name)
+    up = re.sub(r'\s+', ' ', str(raw or "")).strip().upper()
+    if not up:
+        return (None, None, None)
+    make = None
+    for mw in MULTIWORD_MAKES:
+        if up.startswith(mw + " ") or up == mw:
+            make = mw
+            up = up[len(mw):].strip()
+            break
+    if make is None:
+        parts = up.split(" ", 1)
+        make = parts[0]
+        up = parts[1] if len(parts) > 1 else ""
+    make = MAKE_ALIASES.get(make, make)
+    return (make or None, canonical_model(up), raw or None)
+
+def _num(v):
+    """Plain JSON number, or None. Never returns 0 for missing input."""
+    try:
+        if v is None:
+            return None
+        f = float(v)
+        if f != f:      # NaN
+            return None
+        return int(f) if float(f).is_integer() else round(f, 2)
+    except Exception:
+        return None
+
+def _slug(text):
+    return re.sub(r'[^A-Za-z0-9]+', '-', str(text or "report")).strip('-').lower() or "report"
+
+def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
+    """
+    The metrics block for one scope (a single site, or the whole group).
+    Every figure here is computed from the same frames that feed the deck.
+    Missing data is None or an omitted key — never 0.
+    """
+    block = {}
+    shopped = len(scope_vdp)
+    sold_n = len(scope_sold)
+    block['vehicles_shopped'] = shopped if shopped else None
+    block['vehicles_sold'] = sold_n if sold_n else None
+    block['look_to_book_pct'] = round(sold_n / shopped * 100, 1) if shopped else None
+
+    for label, cond in (('new', 'New'), ('used', 'Used')):
+        pool = scope_vdp[scope_vdp['Type'] == cond]
+        hit = scope_sold[scope_sold['Type'] == cond]
+        block[f'look_to_book_pct_{label}'] = (round(len(hit) / len(pool) * 100, 1)
+                                              if len(pool) else None)
+        block[f'vehicles_sold_{label}'] = len(hit) if len(hit) else None
+
+    block['est_revenue_sold'] = _num(scope_sold['Est. Value'].sum()) if sold_n else None
+    block['est_pipeline_value'] = _num(scope_vdp['Est. Value'].sum()) if shopped else None
+    block['avg_sold_price_est'] = _num(scope_sold['Est. Value'].mean()) if sold_n else None
+    # days_on_lot / body_style are not computed by this app -> intentionally absent
+
+    visits = _num(scope_df['Attributed Unique Visitors'].sum())
+    block['visits_total'] = visits if visits else None
+
+    if sold_n:
+        makes = {}
+        models = {}
+        for _, r in scope_sold.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            if mk:
+                makes[mk] = makes.get(mk, 0) + 1
+            if mk and md:
+                key = (mk, md)
+                ent = models.setdefault(key, {'count': 0, 'raw': raw})
+                ent['count'] += 1
+        block['sold_by_make'] = [{'make': k, 'count': v}
+                                 for k, v in sorted(makes.items(), key=lambda kv: -kv[1])] or None
+        rows = []
+        for (mk, md), ent in sorted(models.items(), key=lambda kv: -kv[1]['count']):
+            row = {'make': mk, 'model': md, 'label': f"{mk} {md}", 'count': ent['count']}
+            if ent['raw'] and ent['raw'].upper() != f"{mk} {md}":
+                row['raw_name'] = ent['raw']
+            rows.append(row)
+        block['sold_by_make_model'] = rows or None
+        block['top_sellers'] = rows[:5] or None
+
+        tiers = scope_sold['Price Tier'].value_counts()
+        block['sold_by_price_tier'] = [
+            {'tier': _slug(k).upper().replace('-', '_'), 'label': str(k), 'count': int(v)}
+            for k, v in tiers.items()] or None
+    else:
+        block['sold_by_make'] = None
+        block['sold_by_make_model'] = None
+        block['top_sellers'] = None
+        block['sold_by_price_tier'] = None
+
+    # Status of the shopped vehicles only — NOT the dealer's full inventory.
+    statuses = scope_vdp['Sold_Status'].astype(str)
+    avail = int((statuses == 'Available').sum())
+    unver = int(statuses.str.startswith('ERROR').sum())
+    block['shopped_vehicle_status'] = {
+        'available': avail or None,
+        'sold': sold_n or None,
+        'unverified': unver or None,
+    } if shopped else None
+
+    traffic = (scope_df.groupby('Category')['Attributed Unique Visitors'].sum()
+               .sort_values(ascending=False))
+    block['traffic_mix'] = [
+        {'category': _slug(k).upper().replace('-', '_'), 'label': str(k), 'visits': int(v)}
+        for k, v in traffic.items() if int(v) > 0] or None
+
+    if scope_missed is not None and not scope_missed.empty:
+        veh = []
+        for _, r in scope_missed.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            item = {'make': mk, 'model': md,
+                    'label': f"{mk} {md}" if mk and md else (raw or None),
+                    'visits': _num(r.get('Attributed Unique Visitors'))}
+            vin = str(r.get('VIN') or '').strip()
+            if vin and vin.upper() != 'N/A':
+                item['vin'] = vin
+            veh.append(item)
+        block['missed_opportunities'] = {'count': len(veh), 'vehicles': veh}
+    else:
+        block['missed_opportunities'] = None
+
+    return {k: v for k, v in block.items() if v is not None}
+
+def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
+                     dealer_group=None, report_ctx=None):
+    """
+    Machine-readable facts export: the same figures the deck presents, as data.
+    Built from the frames that feed the charts and tables, so the file cannot
+    disagree with the deck. Numbers and labels only — no narrative.
+    """
+    report_ctx = report_ctx or {}
+    try:
+        scan_dt = datetime.datetime.now(pytz.timezone("US/Eastern"))
+    except Exception:
+        scan_dt = datetime.datetime.now()
+
+    # analysis_period is REQUIRED: the report builder aligns this file against
+    # the website attribution and Polk periods, and a facts file without it
+    # cannot be safely combined. No report month -> no facts file.
+    rm = st.session_state.get('report_month_sel')
+    if not rm:
+        return None
+    y, mo = int(rm[0]), int(rm[1])
+    start = datetime.date(y, mo, 1)
+    nxt = datetime.date(y + (mo == 12), (mo % 12) + 1, 1)
+    period = {
+        'start': start.isoformat(),
+        'end': (nxt - datetime.timedelta(days=1)).isoformat(),
+        'source': 'rep_entered_report_month',
+    }
+
+    sites = []
+    for dealer in sorted(df['Dealer'].dropna().unique()):
+        d_rows = df[df['Dealer'] == dealer]
+        domain = None
+        for u in d_rows['Page Url'].head(5):
+            try:
+                domain = urlparse(str(u)).netloc.replace('www.', '').lower()
+                if domain:
+                    break
+            except Exception:
+                continue
+        d_sold = sold_df[sold_df['Dealer'] == dealer] if not sold_df.empty else sold_df
+        brands = []
+        if not d_sold.empty:
+            seen = {}
+            for _, r in d_sold.iterrows():
+                mk, _md, _raw = split_make_model(r.get('Vehicle Name'))
+                if mk:
+                    seen[mk] = seen.get(mk, 0) + 1
+            brands = [m for m, _c in sorted(seen.items(), key=lambda kv: -kv[1])]
+        site = {'site_id': _slug(dealer), 'dealer_name': str(dealer)}
+        if domain:
+            site['domain'] = domain
+            site['url'] = f"https://www.{domain}/"
+        if brands:
+            # Derived from the makes actually sold in this report, not a
+            # franchise list the app holds.
+            site['brands_observed'] = brands
+        sites.append(site)
+
+    is_group = df['Dealer'].nunique() > 1
+    meta = {
+        'generated_at': scan_dt.isoformat(),
+        'app_build': APP_BUILD,
+        'report_id': str(report_id),
+        'is_group': bool(is_group),
+        'site_count': int(df['Dealer'].nunique()),
+        'inventory_scanned_at': scan_dt.date().isoformat(),
+        'analysis_period': period,
+        'vdp_visit_threshold': _num(metrics.get('min_visitors')),
+    }
+    if is_group:
+        meta['group_name'] = str(report_id)
+    if report_ctx.get('lookback_days') is not None:
+        meta['lookback_days'] = int(report_ctx['lookback_days'])
+    meta = {k: v for k, v in meta.items() if v is not None}
+
+    totals = _facts_block(df, vdp_df, sold_df, missed_df)
+    uv = report_ctx.get('unique_visitors')
+    if uv:
+        totals['unique_visitors'] = int(uv)
+        if report_ctx.get('avg_pages'):
+            totals['avg_pages_per_visitor'] = float(report_ctx['avg_pages'])
+
+    facts = {
+        'schema_version': FACTS_SCHEMA_VERSION,
+        'meta': meta,
+        'sites': sites,
+        'totals': totals,
+    }
+
+    if is_group:
+        by_site = {}
+        for dealer in sorted(df['Dealer'].dropna().unique()):
+            s_df = df[df['Dealer'] == dealer]
+            s_vdp = vdp_df[vdp_df['Dealer'] == dealer]
+            s_sold = sold_df[sold_df['Dealer'] == dealer] if not sold_df.empty else sold_df
+            s_missed = (missed_df[missed_df['Dealer'] == dealer]
+                        if missed_df is not None and not missed_df.empty else None)
+            blk = _facts_block(s_df, s_vdp, s_sold, s_missed)
+            if blk:
+                by_site[_slug(dealer)] = blk
+        if by_site:
+            facts['by_site'] = by_site
+
+    return facts
+
+def facts_filename(report_id, facts):
+    period = (facts.get('meta') or {}).get('analysis_period') or {}
+    start = period.get('start') or (facts.get('meta') or {}).get('inventory_scanned_at')
+    end = period.get('end') or (facts.get('meta') or {}).get('inventory_scanned_at')
+    return f"{_slug(report_id)}_{start}_{end}_facts.json"
 
 def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                       missed_df=None, dealer_group=None,
@@ -3808,6 +4088,23 @@ if st.session_state.current_report_id is not None:
     with ex1:
         pdf_data = create_pdf_report(df, sold_df, metrics_bundle, export_missed_df, include_missed_in_pdf, dealer_group_export, include_dealer_details, chart_images=chart_images)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
+    # Machine-readable facts, generated from the same frames as the deck so the
+    # two can never disagree. Produced whenever the deck is.
+    facts_payload = None
+    facts_bytes = None
+    facts_name = None
+    try:
+        facts_payload = build_facts_json(df, vdp_df, sold_df, export_missed_df,
+                                         metrics_bundle,
+                                         st.session_state.current_report_id,
+                                         dealer_group=dealer_group_export,
+                                         report_ctx=report_ctx)
+        if facts_payload:
+            facts_bytes = json.dumps(facts_payload, indent=2).encode('utf-8')
+            facts_name = facts_filename(st.session_state.current_report_id, facts_payload)
+    except Exception as _fe:
+        st.caption(f"Facts export unavailable for this report ({type(_fe).__name__}).")
+
     with ex2:
         pptx_data = build_pptx_report(df, sold_df, metrics_bundle, chart_images,
                                       st.session_state.current_report_id,
@@ -3826,6 +4123,19 @@ if st.session_state.current_report_id is not None:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex4:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
+
+    # Tucked away on purpose: this file is for the attribution report builder,
+    # not part of a rep's normal workflow.
+    with st.expander("🧩 Data export (for attribution reporting)", expanded=False):
+        if facts_bytes:
+            st.caption("Structured version of this report's figures, for combining with "
+                       "website attribution and Polk data.")
+            st.download_button("Download facts (.json)", data=facts_bytes,
+                               file_name=facts_name, mime="application/json")
+        else:
+            st.caption("Select the **report month** under 🗓️ Report Details in the "
+                       "sidebar to enable this export — the reporting period is needed "
+                       "to line this analysis up against website and Polk data.")
 
     st.divider()
     
