@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import json
 import re
 import concurrent.futures
 import plotly.express as px
@@ -622,6 +623,285 @@ def build_kpi_band_image(metrics):
         return buf
     except Exception:
         return None
+
+FACTS_SCHEMA_VERSION = 1
+APP_BUILD = "2026.09.23"   # bump on release; surfaced in the facts export
+
+# Makes whose names are more than one word, so "make" can be split off the
+# front of a normalized vehicle name correctly.
+MULTIWORD_MAKES = [
+    "MERCEDES BENZ", "LAND ROVER", "ALFA ROMEO", "ASTON MARTIN", "ROLLS ROYCE",
+    "GENERAL MOTORS",
+]
+
+# Raw-slug make spellings -> the canonical form used for cross-source matching.
+MAKE_ALIASES = {
+    "MERCEDES BENZ": "MERCEDES-BENZ",
+    "LAND ROVER": "LAND ROVER",
+    "ALFA ROMEO": "ALFA ROMEO",
+    "ROLLS ROYCE": "ROLLS-ROYCE",
+    "ASTON MARTIN": "ASTON MARTIN",
+    "CHEVY": "CHEVROLET",
+    "VW": "VOLKSWAGEN",
+    "MAZDA": "MAZDA",
+    "GMC": "GMC",
+    "BMW": "BMW",
+}
+
+def canonical_model(model_text):
+    """
+    Canonical model string for matching against Polk registrations and website
+    page names: uppercase, single-spaced, and short alpha+numeric series
+    hyphenated the way the industry writes them ("F 150" -> "F-150",
+    "CX 5" -> "CX-5"). Longer words keep their space ("MODEL 3" stays).
+    """
+    s = re.sub(r'\s+', ' ', str(model_text or "")).strip().upper()
+    if not s:
+        return None
+    s = re.sub(r'\b([A-Z]{1,2}) (\d{2,4}[A-Z]{0,2})\b', r'\1-\2', s)
+    return s
+
+def split_make_model(vehicle_name):
+    """
+    ('FORD', 'F-150', 'Ford F 150 Lariat 4Wd') from a report vehicle name.
+    Uses normalize_model first so trims/drivetrain are already stripped.
+    Returns (make, model, raw_normalized) with None where unknown.
+    """
+    raw = normalize_model(vehicle_name)
+    up = re.sub(r'\s+', ' ', str(raw or "")).strip().upper()
+    if not up:
+        return (None, None, None)
+    make = None
+    for mw in MULTIWORD_MAKES:
+        if up.startswith(mw + " ") or up == mw:
+            make = mw
+            up = up[len(mw):].strip()
+            break
+    if make is None:
+        parts = up.split(" ", 1)
+        make = parts[0]
+        up = parts[1] if len(parts) > 1 else ""
+    make = MAKE_ALIASES.get(make, make)
+    return (make or None, canonical_model(up), raw or None)
+
+def _num(v):
+    """Plain JSON number, or None. Never returns 0 for missing input."""
+    try:
+        if v is None:
+            return None
+        f = float(v)
+        if f != f:      # NaN
+            return None
+        return int(f) if float(f).is_integer() else round(f, 2)
+    except Exception:
+        return None
+
+def _slug(text):
+    return re.sub(r'[^A-Za-z0-9]+', '-', str(text or "report")).strip('-').lower() or "report"
+
+def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
+    """
+    The metrics block for one scope (a single site, or the whole group).
+    Every figure here is computed from the same frames that feed the deck.
+    Missing data is None or an omitted key — never 0.
+    """
+    block = {}
+    shopped = len(scope_vdp)
+    sold_n = len(scope_sold)
+    block['vehicles_shopped'] = shopped if shopped else None
+    block['vehicles_sold'] = sold_n if sold_n else None
+    block['look_to_book_pct'] = round(sold_n / shopped * 100, 1) if shopped else None
+
+    for label, cond in (('new', 'New'), ('used', 'Used')):
+        pool = scope_vdp[scope_vdp['Type'] == cond]
+        hit = scope_sold[scope_sold['Type'] == cond]
+        block[f'look_to_book_pct_{label}'] = (round(len(hit) / len(pool) * 100, 1)
+                                              if len(pool) else None)
+        block[f'vehicles_sold_{label}'] = len(hit) if len(hit) else None
+
+    block['est_revenue_sold'] = _num(scope_sold['Est. Value'].sum()) if sold_n else None
+    block['est_pipeline_value'] = _num(scope_vdp['Est. Value'].sum()) if shopped else None
+    block['avg_sold_price_est'] = _num(scope_sold['Est. Value'].mean()) if sold_n else None
+    # days_on_lot / body_style are not computed by this app -> intentionally absent
+
+    visits = _num(scope_df['Attributed Unique Visitors'].sum())
+    block['visits_total'] = visits if visits else None
+
+    if sold_n:
+        makes = {}
+        models = {}
+        for _, r in scope_sold.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            if mk:
+                makes[mk] = makes.get(mk, 0) + 1
+            if mk and md:
+                key = (mk, md)
+                ent = models.setdefault(key, {'count': 0, 'raw': raw})
+                ent['count'] += 1
+        block['sold_by_make'] = [{'make': k, 'count': v}
+                                 for k, v in sorted(makes.items(), key=lambda kv: -kv[1])] or None
+        rows = []
+        for (mk, md), ent in sorted(models.items(), key=lambda kv: -kv[1]['count']):
+            row = {'make': mk, 'model': md, 'label': f"{mk} {md}", 'count': ent['count']}
+            if ent['raw'] and ent['raw'].upper() != f"{mk} {md}":
+                row['raw_name'] = ent['raw']
+            rows.append(row)
+        block['sold_by_make_model'] = rows or None
+        block['top_sellers'] = rows[:5] or None
+
+        tiers = scope_sold['Price Tier'].value_counts()
+        block['sold_by_price_tier'] = [
+            {'tier': _slug(k).upper().replace('-', '_'), 'label': str(k), 'count': int(v)}
+            for k, v in tiers.items()] or None
+    else:
+        block['sold_by_make'] = None
+        block['sold_by_make_model'] = None
+        block['top_sellers'] = None
+        block['sold_by_price_tier'] = None
+
+    # Status of the shopped vehicles only — NOT the dealer's full inventory.
+    statuses = scope_vdp['Sold_Status'].astype(str)
+    avail = int((statuses == 'Available').sum())
+    unver = int(statuses.str.startswith('ERROR').sum())
+    block['shopped_vehicle_status'] = {
+        'available': avail or None,
+        'sold': sold_n or None,
+        'unverified': unver or None,
+    } if shopped else None
+
+    traffic = (scope_df.groupby('Category')['Attributed Unique Visitors'].sum()
+               .sort_values(ascending=False))
+    block['traffic_mix'] = [
+        {'category': _slug(k).upper().replace('-', '_'), 'label': str(k), 'visits': int(v)}
+        for k, v in traffic.items() if int(v) > 0] or None
+
+    if scope_missed is not None and not scope_missed.empty:
+        veh = []
+        for _, r in scope_missed.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            item = {'make': mk, 'model': md,
+                    'label': f"{mk} {md}" if mk and md else (raw or None),
+                    'visits': _num(r.get('Attributed Unique Visitors'))}
+            vin = str(r.get('VIN') or '').strip()
+            if vin and vin.upper() != 'N/A':
+                item['vin'] = vin
+            veh.append(item)
+        block['missed_opportunities'] = {'count': len(veh), 'vehicles': veh}
+    else:
+        block['missed_opportunities'] = None
+
+    return {k: v for k, v in block.items() if v is not None}
+
+def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
+                     dealer_group=None, report_ctx=None):
+    """
+    Machine-readable facts export: the same figures the deck presents, as data.
+    Built from the frames that feed the charts and tables, so the file cannot
+    disagree with the deck. Numbers and labels only — no narrative.
+    """
+    report_ctx = report_ctx or {}
+    try:
+        scan_dt = datetime.datetime.now(pytz.timezone("US/Eastern"))
+    except Exception:
+        scan_dt = datetime.datetime.now()
+
+    # analysis_period is REQUIRED: the report builder aligns this file against
+    # the website attribution and Polk periods, and a facts file without it
+    # cannot be safely combined. No report month -> no facts file.
+    rm = st.session_state.get('report_month_sel')
+    if not rm:
+        return None
+    y, mo = int(rm[0]), int(rm[1])
+    start = datetime.date(y, mo, 1)
+    nxt = datetime.date(y + (mo == 12), (mo % 12) + 1, 1)
+    period = {
+        'start': start.isoformat(),
+        'end': (nxt - datetime.timedelta(days=1)).isoformat(),
+        'source': 'rep_entered_report_month',
+    }
+
+    sites = []
+    for dealer in sorted(df['Dealer'].dropna().unique()):
+        d_rows = df[df['Dealer'] == dealer]
+        domain = None
+        for u in d_rows['Page Url'].head(5):
+            try:
+                domain = urlparse(str(u)).netloc.replace('www.', '').lower()
+                if domain:
+                    break
+            except Exception:
+                continue
+        d_sold = sold_df[sold_df['Dealer'] == dealer] if not sold_df.empty else sold_df
+        brands = []
+        if not d_sold.empty:
+            seen = {}
+            for _, r in d_sold.iterrows():
+                mk, _md, _raw = split_make_model(r.get('Vehicle Name'))
+                if mk:
+                    seen[mk] = seen.get(mk, 0) + 1
+            brands = [m for m, _c in sorted(seen.items(), key=lambda kv: -kv[1])]
+        site = {'site_id': _slug(dealer), 'dealer_name': str(dealer)}
+        if domain:
+            site['domain'] = domain
+            site['url'] = f"https://www.{domain}/"
+        if brands:
+            # Derived from the makes actually sold in this report, not a
+            # franchise list the app holds.
+            site['brands_observed'] = brands
+        sites.append(site)
+
+    is_group = df['Dealer'].nunique() > 1
+    meta = {
+        'generated_at': scan_dt.isoformat(),
+        'app_build': APP_BUILD,
+        'report_id': str(report_id),
+        'is_group': bool(is_group),
+        'site_count': int(df['Dealer'].nunique()),
+        'inventory_scanned_at': scan_dt.date().isoformat(),
+        'analysis_period': period,
+        'vdp_visit_threshold': _num(metrics.get('min_visitors')),
+    }
+    if is_group:
+        meta['group_name'] = str(report_id)
+    if report_ctx.get('lookback_days') is not None:
+        meta['lookback_days'] = int(report_ctx['lookback_days'])
+    meta = {k: v for k, v in meta.items() if v is not None}
+
+    totals = _facts_block(df, vdp_df, sold_df, missed_df)
+    uv = report_ctx.get('unique_visitors')
+    if uv:
+        totals['unique_visitors'] = int(uv)
+        if report_ctx.get('avg_pages'):
+            totals['avg_pages_per_visitor'] = float(report_ctx['avg_pages'])
+
+    facts = {
+        'schema_version': FACTS_SCHEMA_VERSION,
+        'meta': meta,
+        'sites': sites,
+        'totals': totals,
+    }
+
+    if is_group:
+        by_site = {}
+        for dealer in sorted(df['Dealer'].dropna().unique()):
+            s_df = df[df['Dealer'] == dealer]
+            s_vdp = vdp_df[vdp_df['Dealer'] == dealer]
+            s_sold = sold_df[sold_df['Dealer'] == dealer] if not sold_df.empty else sold_df
+            s_missed = (missed_df[missed_df['Dealer'] == dealer]
+                        if missed_df is not None and not missed_df.empty else None)
+            blk = _facts_block(s_df, s_vdp, s_sold, s_missed)
+            if blk:
+                by_site[_slug(dealer)] = blk
+        if by_site:
+            facts['by_site'] = by_site
+
+    return facts
+
+def facts_filename(report_id, facts):
+    period = (facts.get('meta') or {}).get('analysis_period') or {}
+    start = period.get('start') or (facts.get('meta') or {}).get('inventory_scanned_at')
+    end = period.get('end') or (facts.get('meta') or {}).get('inventory_scanned_at')
+    return f"{_slug(report_id)}_{start}_{end}_facts.json"
 
 def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                       missed_df=None, dealer_group=None,
@@ -1569,16 +1849,54 @@ def get_year(url):
     match = re.search(r'(?:^|[^0-9])((?:19|20)\d{2})(?:$|[^0-9])', str(url))
     return match.group(1) if match else None
 
+# ISO 3779 VIN check-digit transliteration (position 9 validates the whole VIN).
+_VIN_TRANS = {**{str(d): d for d in range(10)},
+              **dict(zip("ABCDEFGHJKLMNPRSTUVWXYZ",
+                         [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 7, 9, 2, 3, 4, 5, 6, 7, 8, 9]))}
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+def vin_check_digit_ok(vin):
+    """True if the VIN satisfies the North American check digit (position 9)."""
+    try:
+        vin = str(vin).upper()
+        if len(vin) != 17 or re.search(r'[IOQ]', vin):
+            return False
+        total = sum(_VIN_TRANS[c] * _VIN_WEIGHTS[i] for i, c in enumerate(vin))
+        rem = total % 11
+        return vin[8] == ("X" if rem == 10 else str(rem))
+    except Exception:
+        return False
+
+def is_plausible_vin(candidate):
+    """
+    Guards against 17-char slices of hex page IDs (some dealer platforms use
+    32-char GUIDs in VDP URLs, e.g. .../2024-Acura-MDX-Macon-0b4e...b630.htm).
+    Such a slice looks VIN-shaped but is not a VIN, and treating it as one
+    makes every vehicle look SOLD. Accept only if the candidate passes the
+    check digit, or contains a letter that hex IDs cannot have (G-Z except
+    I/O/Q). Real VINs satisfy at least one of these; GUID slices satisfy
+    neither.
+    """
+    c = str(candidate).upper()
+    if len(c) != 17 or re.search(r'[IOQ]', c) or not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', c):
+        return False
+    if vin_check_digit_ok(c):
+        return True
+    return bool(re.search(r'[G-HJ-NP-Z]', c))   # non-hex letter => not a hex ID
+
 def extract_vin(url):
     try:
         path = urlparse(str(url)).path.upper().strip('/')
         match = re.search(r'(?:^|[-/])([A-HJ-NPR-Z0-9]{17})(?:[-/\.]|$)', path)
-        if match: return match.group(1)
-        # Fallback: only accept a real 17-char VIN (excludes I/O/Q). A shorter
-        # token is NOT a VIN — grabbing it would cause false "SOLD" results, so
-        # we return N/A and let the year-based logic handle it instead.
-        blocks = re.findall(r'[A-HJ-NPR-Z0-9]{17}', path)
-        if blocks: return blocks[-1]
+        if match and is_plausible_vin(match.group(1)):
+            return match.group(1)
+        # Fallback: only standalone 17-char tokens, and only if they look like
+        # real VINs. A slice out of a longer alphanumeric run (page GUID) is
+        # NOT a VIN — grabbing it would cause false "SOLD" results, so we
+        # return N/A and let the year-based logic handle it instead.
+        for token in re.split(r'[^A-HJ-NPR-Z0-9]+', path):
+            if len(token) == 17 and is_plausible_vin(token):
+                return token
         return "N/A"
     except:
         return "N/A"
@@ -1697,6 +2015,76 @@ from collections import defaultdict
 # ~10,000 requests into a couple hundred and works for a store of any size —
 # no 1,000-record pagination ceiling. Runs on algolia.net, never the firewall.
 # ======================================================================
+
+# Real VINs discovered during the scan (for dealers whose URLs don't carry one).
+HARVESTED_VINS = {}
+
+def url_key(url):
+    """
+    The identifying token from a VDP link, for dealers whose URLs carry a page
+    ID instead of a VIN (e.g. .../2024-Acura-MDX-Macon-0b4e4a42ac18...b630.htm
+    -> '0b4e4a42ac184abdfb3c758d6119b630'). Falls back to the last path slug.
+    """
+    try:
+        path = urlparse(str(url)).path.rstrip('/')
+        slug = re.sub(r'\.html?$', '', path.split('/')[-1])
+        m = re.findall(r'[0-9a-fA-F]{16,}', slug)
+        if m:
+            return m[-1]
+        return slug
+    except Exception:
+        return ""
+
+def resolve_algolia_keys(domain, cfg, keys, session):
+    """
+    Resolve VIN-less vehicles against the dealer's own Algolia index using the
+    page ID from each VDP link. Returns (status_map, vin_map).
+    If EVERY key comes back with no hits, the index likely doesn't search that
+    field — we return nothing so the caller falls through to the MarketCheck
+    URL match rather than declaring live cars sold.
+    """
+    app_id, api_key, index_name = cfg['app_id'], cfg['api_key'], cfg['index']
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
+    headers = {
+        "x-algolia-application-id": app_id,
+        "x-algolia-api-key": api_key,
+        "Content-Type": "application/json",
+        "Referer": f"https://www.{domain}/",
+        "Origin": f"https://www.{domain}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    }
+    status, vins_found = {}, {}
+    keys = [k for k in keys if k]
+    BATCH = 50
+    try:
+        for i in range(0, len(keys), BATCH):
+            chunk = keys[i:i + BATCH]
+            body = {"requests": [
+                {"indexName": index_name, "params": f"query={k}&hitsPerPage=1"}
+                for k in chunk
+            ]}
+            r = session.post(endpoint, headers=headers, json=body, timeout=15)
+            if r.status_code != 200:
+                break
+            for k, res in zip(chunk, r.json().get("results", [])):
+                hits = res.get("hits", []) or []
+                if res.get("nbHits", 0) > 0:
+                    status[k] = "Available"
+                    for h in hits[:1]:
+                        for f in ("vin", "VIN", "objectID"):
+                            cand = str(h.get(f, "")).upper().strip()
+                            if is_plausible_vin(cand):
+                                vins_found[k] = cand
+                                break
+                else:
+                    status[k] = "SOLD (Not in Dealer Database)"
+    except Exception:
+        pass
+    # Nothing matched at all -> the page ID isn't searchable in this index.
+    if status and not any(v == "Available" for v in status.values()):
+        return ({}, {})
+    return (status, vins_found)
 
 def resolve_algolia_vins(domain, cfg, vins, session):
     """
@@ -2037,36 +2425,104 @@ def _mc_request(domain, api_key, session, year=None, year_range=None, car_type=N
             session.last_error = f"response error: {type(e).__name__}: {str(e)[:140]}"
         return (None, None)
 
+def normalize_vdp_url(url):
+    """
+    Canonical form of a VDP link for matching our report URLs against the
+    dealer's live listings: host without www, lowercase path, no query string,
+    no trailing slash or .htm/.html suffix.
+    """
+    try:
+        p = urlparse(str(url).strip().lower())
+        host = p.netloc.replace("www.", "")
+        path = re.sub(r'\.html?$', '', p.path.rstrip('/'))
+        if not host and not path:
+            return ""
+        return f"{host}{path}"
+    except Exception:
+        return ""
+
 def _mc_pull(domain, api_key, session, year=None, year_range=None, car_type=None, price_range=None):
     """
-    Pull a slice's VINs, paging in 50s. Aborts early (no paging) if the slice is
-    over the free-tier cap, so an over-cap slice costs ONE call, not ten.
-    Returns (vin_set, complete, num_found): complete means we got the whole slice
-    (so an absent VIN is genuinely sold); num_found is the slice's total.
+    Pull a slice's VINs (and the dealer VDP URLs on those listings), paging in
+    MC_PAGE_SIZE steps. Aborts early (no paging) if the slice is over the
+    free-tier cap, so an over-cap slice costs ONE call, not ten.
+    Returns (vin_set, complete, num_found, url_set): complete means we got the
+    whole slice (so an absent vehicle is genuinely sold). url_set lets us match
+    dealers whose VDP links carry page IDs instead of VINs.
     """
+    def _harvest(listings, vins, urls):
+        """urls is a {normalized_vdp_url: vin} map so a URL match can also
+        recover the real VIN for dealers whose links don't carry one."""
+        for lst in listings:
+            v = str(lst.get("vin", "")).upper().strip()
+            if v:
+                vins.add(v)
+            for key in ("vdp_url", "vdp_url_full", "url"):
+                u = lst.get(key)
+                if u:
+                    n = normalize_vdp_url(u)
+                    if n:
+                        urls[n] = v if is_plausible_vin(v) else urls.get(n)
+                    break
+
     nf, listings = _mc_request(domain, api_key, session, year=year, year_range=year_range,
                                car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=0)
     if nf is None:
-        return (set(), False, None)
-    vins = set()
-    for lst in listings:
-        v = str(lst.get("vin", "")).upper().strip()
-        if v:
-            vins.add(v)
+        return (set(), False, None, {})
+    vins, urls = set(), {}
+    _harvest(listings, vins, urls)
     if nf > MC_PAGE_CAP:
-        return (vins, False, nf)   # over cap -> caller sub-slices; don't waste pages
+        return (vins, False, nf, urls)   # over cap -> caller sub-slices
     start = len(listings)
     while start < nf and start < MC_PAGE_CAP:
         nf2, more = _mc_request(domain, api_key, session, year=year, year_range=year_range,
                                 car_type=car_type, price_range=price_range, rows=MC_PAGE_SIZE, start=start)
         if nf2 is None or not more:
             break
-        for lst in more:
-            v = str(lst.get("vin", "")).upper().strip()
-            if v:
-                vins.add(v)
+        _harvest(more, vins, urls)
         start += len(more)
-    return (vins, start >= nf, nf)
+    return (vins, start >= nf, nf, urls)
+
+def _mc_apply_by_url(out, items, url_set, min_match_rate=0.2):
+    """
+    Resolve vehicles by matching their VDP link against the dealer's live
+    listings — for sites whose URLs carry page IDs instead of VINs.
+    A match rate below min_match_rate means the two URL formats don't line up
+    (MarketCheck may publish a different link style), so we resolve NOTHING
+    rather than risk declaring live cars sold. Returns the match rate, or None
+    if the attempt was rejected.
+    """
+    if not url_set or not items:
+        return None
+    # Match on the page ID rather than the whole path: these sites serve the
+    # SAME vehicle under several slugs (.../2025-Honda-Pilot-Macon-<id> and
+    # .../2025-Honda-Pilot-Macon-Georgia-<id>), and MarketCheck publishes only
+    # one of them. Full-path matching marked the other variant sold.
+    id_map = {}
+    for n, v in (url_set.items() if isinstance(url_set, dict)
+                 else ((x, None) for x in url_set)):
+        k = url_key(n)
+        if k:
+            id_map[k] = v if v else id_map.get(k)
+    normed = [(u, url_key(u), normalize_vdp_url(u)) for u, _v in items]
+    hits = sum(1 for _u, k, n in normed
+               if (k and k in id_map) or (n and n in url_set))
+    rate = hits / max(len(normed), 1)
+    if rate < min_match_rate:
+        return None
+    for u, k, n in normed:
+        matched = (k and k in id_map) or (n and n in url_set)
+        if matched:
+            out[u] = "Available"
+            # Recover the real VIN from the matched listing (these dealers'
+            # links don't contain one).
+            real = id_map.get(k) if k in id_map else (
+                url_set.get(n) if isinstance(url_set, dict) else None)
+            if real and is_plausible_vin(real):
+                HARVESTED_VINS[k or url_key(u)] = real
+        else:
+            out[u] = "SOLD (Not in Market Inventory)"
+    return rate
 
 def _mc_apply(out, items, vin_set, complete):
     """Assign Available/Sold to report items from a pulled slice."""
@@ -2085,7 +2541,7 @@ def _mc_pull_priced(domain, api_key, session, year, car_type, lo, hi, depth=0, p
     (filter ignored by the data), so calls are never wasted on useless recursion.
     Returns (vin_set, complete).
     """
-    vins, complete, nf = _mc_pull(domain, api_key, session, year=year,
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year=year,
                                   car_type=car_type, price_range=f"{lo}-{hi}")
     if nf is None:
         return (set(), False)
@@ -2106,7 +2562,7 @@ MC_PRICE_BANDS = [(0, 45000), (45000, 60000), (60000, 80000), (80000, 100000000)
 
 def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
     """Resolve one model year; if over the cap, split by car_type, then by price."""
-    vins, complete, nf = _mc_pull(domain, api_key, session, year=year)
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year=year)
     if nf is None:
         return
     if complete:
@@ -2116,7 +2572,7 @@ def _mc_resolve_year(domain, api_key, session, year, yr_items, out):
     merged = set(vins)
     all_complete = True
     for ct in ("new", "used", "certified"):
-        vs, cp, nf2 = _mc_pull(domain, api_key, session, year=year, car_type=ct)
+        vs, cp, nf2, _u2 = _mc_pull(domain, api_key, session, year=year, car_type=ct)
         if nf2 is None:
             all_complete = False
             continue
@@ -2142,7 +2598,7 @@ def _mc_band(domain, api_key, session, band_items, out):
         return
     years = [y for _, _, y in band_items]
     lo, hi = min(years), max(years)
-    vins, complete, nf = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
+    vins, complete, nf, _u = _mc_pull(domain, api_key, session, year_range=f"{lo}-{hi}")
     if nf is None:
         return
     if complete:
@@ -2235,7 +2691,7 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None, out=None):
     valid = []
     for u, v, _y in items:
         vv = str(v or "").upper().strip()
-        if len(vv) == 17:
+        if is_plausible_vin(vv):     # never spend a lookup on a page-ID slice
             valid.append((u, vv))
     if not valid:
         return out
@@ -2311,9 +2767,24 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
     # (proven in production 7/20: exact match to baseline) is the fallback for
     # errors, unfiltered-looking responses, and whatever a partial pull left.
     if MC_ENDPOINT == _MC_DEFAULT_ENDPOINT:
-        vins_s, complete_s, nf_s = _mc_pull(domain, api_key, session)
+        vins_s, complete_s, nf_s, urls_s = _mc_pull(domain, api_key, session)
+        # Does this report even have VINs to match on? Some dealer platforms
+        # publish page IDs instead (e.g. .../2024-Acura-MDX-Macon-0b4e...b630.htm).
+        _usable_vins = sum(1 for _u, v, _y in items if is_plausible_vin(v))
+        _vinless = _usable_vins < max(1, int(len(items) * 0.5))
         if nf_s is not None and 0 <= nf_s <= 25000:
             if complete_s:
+                if _vinless:
+                    # No VINs on our side: match on the dealer's own VDP links.
+                    rate = _mc_apply_by_url(out, [(u, v) for u, v, _ in items], urls_s)
+                    if rate is not None:
+                        return out
+                    if hasattr(session, "last_error"):
+                        session.last_error = (
+                            f"{domain}: no VINs in the report URLs and the live listing "
+                            f"links didn't match either - left unresolved rather than "
+                            f"guessing")
+                    return out
                 if cache_out is not None:
                     cache_out[domain] = {"active": set(vins_s), "absent": set(),
                                          "complete": True}
@@ -2336,7 +2807,7 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
                          cache_out=cache_out, out=out)
         return out
     # Try the whole store; if it's over the cap this aborts after one call.
-    vins, complete, nf = _mc_pull(domain, api_key, session)
+    vins, complete, nf, urls_s = _mc_pull(domain, api_key, session)
     if nf is None:
         return out
     if nf > 25000:
@@ -2347,6 +2818,13 @@ def resolve_dealer_marketcheck(domain, items, api_key, session, cache_out=None, 
                                   f"(num_found={nf}) — dealer left unresolved")
         return out
     if complete:
+        _usable = sum(1 for _u, v, _y in items if is_plausible_vin(v))
+        if _usable < max(1, int(len(items) * 0.5)):
+            rate = _mc_apply_by_url(out, [(u, v) for u, v, _ in items], urls_s)
+            if rate is None and hasattr(session, "last_error"):
+                session.last_error = (f"{domain}: no VINs in the report URLs and the live "
+                                      f"listing links didn't match either - left unresolved")
+            return out
         if cache_out is not None:
             cache_out[domain] = {"active": set(vins), "absent": set(),
                                  "complete": True}
@@ -2387,6 +2865,7 @@ def build_all_vin_status(vdp_urls, session):
     each store's VINs in batches (concurrently). Returns {domain: {vin: status}}.
     """
     by_domain = defaultdict(set)
+    by_domain_keys = defaultdict(set)   # VIN-less vehicles, keyed by page ID
     for u in vdp_urls:
         d = urlparse(str(u)).netloc.replace('www.', '').lower()
         cfg = DEALER_API_VAULT.get(d)
@@ -2395,7 +2874,17 @@ def build_all_vin_status(vdp_urls, session):
             v = extract_vin(u)
             if v != "N/A":
                 by_domain[d].add(v)
+            else:
+                by_domain_keys[d].add(url_key(u))
     status = {}
+    for d, keys in by_domain_keys.items():
+        try:
+            kstat, kvins = resolve_algolia_keys(d, DEALER_API_VAULT[d], keys, session)
+            if kstat:
+                status.setdefault(d, {}).update(kstat)
+                HARVESTED_VINS.update(kvins)
+        except Exception:
+            pass
     if not by_domain:
         return status
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(by_domain))) as ex:
@@ -2404,9 +2893,9 @@ def build_all_vin_status(vdp_urls, session):
         for fut in concurrent.futures.as_completed(futs):
             d = futs[fut]
             try:
-                status[d] = fut.result()
+                status.setdefault(d, {}).update(fut.result())
             except Exception:
-                status[d] = {}
+                status.setdefault(d, {})
     return status
 
 def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
@@ -2442,11 +2931,20 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
             return "ERROR (Inventory Unavailable)"
 
     vin = extract_vin(url)
+    pre = (vin_status or {}).get(domain)
     if vin == "N/A":
-        return "ERROR (Inventory Unavailable)"
+        # No VIN in the link: the bulk pre-pass may have resolved this vehicle
+        # by its page ID against the dealer's own index. If not, leave it for
+        # the MarketCheck URL match rather than guessing.
+        k = url_key(url)
+        if pre and k in pre:
+            return pre[k]
+        # Nothing from the dealer's index: check the page itself. These sites
+        # are usually publicly readable even when their API isn't useful, and a
+        # live page (or a 404/redirect) is better evidence than any lookup.
+        return check_universal_status(url, session)
 
     # Resolved in bulk by the pre-pass?
-    pre = (vin_status or {}).get(domain)
     if pre and vin in pre:
         return pre[vin]
 
@@ -2482,6 +2980,44 @@ def scan_url(url, session, ignored_domains, ignore_lock, vin_status=None):
     return "ERROR (Inventory Unavailable)"
 
 # --- THE UNIVERSAL VISUAL SCRAPER ---------------------------------------
+# VIN markers on a VDP, most authoritative first. A page usually repeats its
+# own vehicle's VIN in several of these; "similar vehicles" blocks mention
+# other VINs once or twice, so frequency breaks ties in the fallback.
+_VIN_PATTERNS = [
+    r'vehicleIdentificationNumber["\']?\s*[:=]\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'data-vin\s*=\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'["\']vin["\']\s*:\s*["\']([A-HJ-NPR-Z0-9]{17})["\']',
+    r'\bVIN\b[\s:#]*([A-HJ-NPR-Z0-9]{17})\b',
+]
+
+def harvest_vin_from_html(text, soup=None):
+    """
+    Pull the vehicle's VIN out of a VDP's HTML. Used for dealer platforms whose
+    URLs carry a page ID instead of a VIN, so the report can still show one.
+    Returns a validated VIN or None — never a guess.
+    """
+    try:
+        for pat in _VIN_PATTERNS:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                cand = m.group(1).upper()
+                if is_plausible_vin(cand):
+                    return cand
+        # Fallback: the most-repeated plausible VIN on the page, which is the
+        # page's own vehicle. A single lone hit is accepted; a tie is not.
+        counts = {}
+        for m in re.finditer(r'\b([A-HJ-NPR-Z0-9]{17})\b', text.upper()):
+            c = m.group(1)
+            if is_plausible_vin(c):
+                counts[c] = counts.get(c, 0) + 1
+        if not counts:
+            return None
+        ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            return ranked[0][0]
+    except Exception:
+        pass
+    return None
+
 def check_universal_status(url, session):
     url = str(url).strip() # STRIP INVISIBLE SPACES FROM CSV
     year = get_year(url)
@@ -2527,6 +3063,14 @@ def check_universal_status(url, session):
         text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
+
+        # This dealer's links don't carry a VIN: take it off the page itself so
+        # the report can still show one. Done before the status checks so a
+        # vehicle sold behind an "out of stock" overlay gets its VIN too.
+        if vin == "N/A":
+            found_vin = harvest_vin_from_html(text, soup)
+            if found_vin:
+                HARVESTED_VINS[url_key(url)] = found_vin
         
         # --- SOFT-SOLD / OVERLAY / JSON SCANNER ---
         soft_sold_phrases = [
@@ -2746,6 +3290,43 @@ if run_analysis_clicked:
     
     url_col = 'Page Url' if 'Page Url' in df_raw.columns else 'Page URL' if 'Page URL' in df_raw.columns else df_raw.columns[0]
     df_raw.rename(columns={url_col: 'Page Url'}, inplace=True)
+
+    # Visits column: the Unified Dashboard exports "Attributed Unique Visitors",
+    # but merged/rebuilt files often use another header ("Unique Visits" etc.).
+    # Detect it by name, then fall back to the first numeric column.
+    if 'Attributed Unique Visitors' not in df_raw.columns:
+        _visit_col = None
+        _aliases = ['unique visits', 'unique visitors', 'attributed unique visits',
+                    'attributed visitors', 'attributed visits', 'visits', 'visitors',
+                    'total visits', 'sessions', 'unique page visits', 'page views']
+        _lookup = {str(c).strip().lower(): c for c in df_raw.columns}
+        for _a in _aliases:
+            if _a in _lookup:
+                _visit_col = _lookup[_a]
+                break
+        if _visit_col is None:
+            for _c in df_raw.columns:
+                if _c == 'Page Url':
+                    continue
+                _test = pd.to_numeric(
+                    df_raw[_c].astype(str).str.replace(r'[,\s]', '', regex=True),
+                    errors='coerce')
+                if _test.notna().sum() >= max(1, int(len(df_raw) * 0.8)):
+                    _visit_col = _c
+                    break
+        if _visit_col is None:
+            st.error("❌ Couldn't find a visits column in this CSV. Expected "
+                     "**Attributed Unique Visitors** (or Unique Visits / Visitors). "
+                     f"Columns found: {', '.join(str(c) for c in df_raw.columns)}")
+            st.stop()
+        df_raw.rename(columns={_visit_col: 'Attributed Unique Visitors'}, inplace=True)
+        if str(_visit_col) != 'Attributed Unique Visitors':
+            st.caption(f"Using **{_visit_col}** as the visits column.")
+
+    # Numbers may carry thousands separators or come from projected/merged data.
+    df_raw['Attributed Unique Visitors'] = pd.to_numeric(
+        df_raw['Attributed Unique Visitors'].astype(str).str.replace(r'[,\s]', '', regex=True),
+        errors='coerce').fillna(0).round().astype(int)
     
     df_raw = df_raw.dropna(subset=['Page Url'])
     df_raw = df_raw[df_raw['Page Url'].astype(str).str.strip() != '']
@@ -2807,9 +3388,11 @@ if run_analysis_clicked:
     for url, res in vdp_results.items():
         if str(res).startswith("ERROR") and "No VIN" not in str(res):
             v = extract_vin(url)
-            if v != "N/A":
-                dom = urlparse(str(url)).netloc.replace('www.', '').lower()
-                mc_by_domain[dom].append((url, v))
+            # Vehicles without a readable VIN are still included: dealers whose
+            # VDP links carry page IDs instead of VINs are resolved by matching
+            # those links against the live listings (see _mc_apply_by_url).
+            dom = urlparse(str(url)).netloc.replace('www.', '').lower()
+            mc_by_domain[dom].append((url, v))
 
     # Blocked-site signature check: only dealers with MC_MIN_UNRESOLVED or more
     # unchecked vehicles qualify — a handful of stragglers on an otherwise
@@ -2974,8 +3557,37 @@ if run_analysis_clicked:
     
     df['Is Sold'] = df['Sold_Status'].str.startswith('SOLD')
     df['Vehicle Name'] = df['Page Url'].apply(clean_name_universal)
-    df['VIN'] = df['Page Url'].apply(extract_vin)
+    df['VIN'] = df['Page Url'].apply(
+        lambda u: HARVESTED_VINS.get(url_key(u)) or extract_vin(u))
     df['Type'] = df['Page Url'].apply(extract_type)
+
+    # --- SANITY GUARD (data quality only): if nearly everything reads SOLD AND
+    # we couldn't read real VINs off this dealer's pages, the matching itself
+    # failed (e.g. a site whose VDP URLs carry page IDs rather than VINs) and
+    # the "sales" are false. Withhold those.
+    # NOTE: a high sold rate on its own is NOT an error — an older report
+    # naturally shows most cars sold. That case is handled by a dismissible
+    # advisory in the results view, and the data is left intact.
+    try:
+        _checked = df[df['Sold_Status'].astype(str).str.match(r'SOLD|Available')]
+        _dom_of = lambda u: urlparse(str(u)).netloc.replace('www.', '').lower()
+        for _dom, _grp in _checked.groupby(df['Page Url'].apply(_dom_of)):
+            if len(_grp) < 10:
+                continue
+            _sold_rate = _grp['Sold_Status'].astype(str).str.startswith('SOLD').mean()
+            _bad_vins = (_grp['Page Url'].apply(extract_vin) == 'N/A').mean()
+            if _sold_rate >= 0.9 and _bad_vins > 0.5:
+                _idx = df['Page Url'].apply(_dom_of) == _dom
+                df.loc[_idx & df['Is Sold'], 'Sold_Status'] = 'ERROR (Verification Failed)'
+                df.loc[_idx, 'Is Sold'] = False
+                st.error(f"⚠️ **Results withheld for {_dom}.** {int(_sold_rate * 100)}% of "
+                         f"shopped vehicles came back as sold, and this dealer's vehicle "
+                         f"pages don't publish VINs we can match — so those \"sales\" can't "
+                         f"be verified. They're marked unverified rather than sold, so "
+                         f"nothing incorrect reaches a client. Please spot-check a few VDP "
+                         f"links and report this dealer so we can add support for it.")
+    except Exception:
+        pass
     
     vdp_mask = df['Category'] == 'VDP'
     df.loc[vdp_mask, 'Category'] = df.loc[vdp_mask, 'Type'] + ' VDP'
@@ -3067,7 +3679,11 @@ if st.session_state.history:
                           ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
                                                               "rows": "50"}),
                           ("vins=", {"vins": diag_vin.strip().upper()}),
-                          ("vin=", {"vin": diag_vin.strip().upper()})]
+                          ("vin=", {"vin": diag_vin.strip().upper()}),
+                          # 1-call inventory test: zero listings, every VIN as a facet
+                          ("facets=vin (1-call inventory)", {"source": diag_domain.strip(),
+                                                             "rows": "0",
+                                                             "facets": "vin|0|1000"})]
                 # Second probe replicates the report's store call exactly:
                 # same params AND the same session construction.
                 _diag_sess = _rq.Session()
@@ -3084,11 +3700,30 @@ if st.session_state.history:
                         continue
                     try:
                         _getter = _diag_sess.get if "report-style" in label else _rq.get
-                        pr = _getter(MC_ENDPOINT, params={"api_key": dkey, "rows": "1",
-                                                          "start": "0", **extra}, timeout=20)
+                        # Facets exist only on the search endpoint; test it there no
+                        # matter which endpoint the report is configured to use.
+                        _target = _MC_DEFAULT_ENDPOINT if "facets" in label else MC_ENDPOINT
+                        pr = _getter(_target, params={"api_key": dkey, "rows": "1",
+                                                      "start": "0", **extra}, timeout=20)
                         if pr.status_code == 200:
-                            nf = pr.json().get("num_found", "?")
-                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
+                            body = pr.json()
+                            nf = body.get("num_found", "?")
+                            if "facets" in label:
+                                fac = (body.get("facets") or {}).get("vin") or []
+                                st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`, "
+                                            f"VINs returned as facets = `{len(fac)}`")
+                                if fac and nf not in ("?", None) and len(fac) >= min(int(nf), 1000) * 0.9:
+                                    st.caption("✅ Facets returned (nearly) the whole store in one "
+                                               "call — a 1-call inventory pull is viable for this "
+                                               "dealer.")
+                                elif fac:
+                                    st.caption("Facets returned a partial list — MarketCheck caps "
+                                               "the facet length below this store's size.")
+                                else:
+                                    st.caption("No VIN facets returned — this key/endpoint doesn't "
+                                               "support facets=vin.")
+                            else:
+                                st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
                         else:
                             st.markdown(f"**{label}** — HTTP {pr.status_code}: "
                                         f"`{str(pr.text)[:120]}`")
@@ -3100,10 +3735,58 @@ if st.session_state.history:
                            "in the millions means that filter is being ignored.")
 
 # --- MAIN DASHBOARD DISPLAY ---
+def dismissible_notice(notice_key, body, icon="🗓️"):
+    """
+    On-screen advisory the rep can close. Never written into the PDF/PPTX —
+    this is guidance for reading the report, not a finding about the dealer.
+    """
+    flag = f"_dismissed_{notice_key}"
+    if st.session_state.get(flag):
+        return
+    box = st.container()
+    with box:
+        col_msg, col_x = st.columns([30, 1])
+        with col_msg:
+            st.warning(f"{icon} {body}")
+        with col_x:
+            if st.button("✕", key=f"_dismiss_btn_{notice_key}", help="Dismiss this note"):
+                st.session_state[flag] = True
+                st.rerun()
+
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
+
+    # --- LOOKBACK ADVISORY (screen only, dismissible) ---
+    # A long gap between the campaign month and the scan naturally pushes most
+    # vehicles into "sold" — the report is still accurate, it just proves less.
+    try:
+        _rid = str(st.session_state.current_report_id)
+        _months_back = None
+        _rm = st.session_state.get('report_month_sel')
+        if _rm:
+            _now = datetime.datetime.now(eastern).date()
+            _months_back = ((_now.year - int(_rm[0])) * 12 + (_now.month - int(_rm[1])))
+        _vdp_rows = df[df['Sold_Status'].astype(str).str.match(r'SOLD|Available')]
+        _sold_share = (_vdp_rows['Sold_Status'].astype(str).str.startswith('SOLD').mean()
+                       if len(_vdp_rows) >= 10 else None)
+        if _months_back is not None and _months_back > 3:
+            dismissible_notice(
+                f"lookback_{_rid}",
+                f"**Long lookback window ({_months_back} months).** Over a window this "
+                f"long most inventory turns over anyway, so a high sold count says less "
+                f"about campaign impact. Consider raising the **VDP filter** to focus on "
+                f"the highest-demand vehicles our campaign actually drove traffic to.")
+        elif _sold_share is not None and _sold_share >= 0.9:
+            dismissible_notice(
+                f"soldrate_{_rid}",
+                f"**{int(_sold_share * 100)}% of shopped vehicles came back sold.** If this "
+                f"report covers a campaign month that closed a while ago, that's expected — "
+                f"inventory turns over. Double-check the report period, and consider raising "
+                f"the **VDP filter** so the story centers on the highest-demand vehicles.")
+    except Exception:
+        pass
     
     # 1. IN-APP ACTION CENTER FOR INVENTORY SYNC
     error_df = df[df['Sold_Status'].str.startswith('ERROR', na=False)].copy()
@@ -3474,6 +4157,23 @@ if st.session_state.current_report_id is not None:
     with ex1:
         pdf_data = create_pdf_report(df, sold_df, metrics_bundle, export_missed_df, include_missed_in_pdf, dealer_group_export, include_dealer_details, chart_images=chart_images)
         st.download_button("📥 Download PDF Summary", data=pdf_data, file_name=f"{st.session_state.current_report_id}_Summary.pdf", mime="application/pdf")
+    # Machine-readable facts, generated from the same frames as the deck so the
+    # two can never disagree. Produced whenever the deck is.
+    facts_payload = None
+    facts_bytes = None
+    facts_name = None
+    try:
+        facts_payload = build_facts_json(df, vdp_df, sold_df, export_missed_df,
+                                         metrics_bundle,
+                                         st.session_state.current_report_id,
+                                         dealer_group=dealer_group_export,
+                                         report_ctx=report_ctx)
+        if facts_payload:
+            facts_bytes = json.dumps(facts_payload, indent=2).encode('utf-8')
+            facts_name = facts_filename(st.session_state.current_report_id, facts_payload)
+    except Exception as _fe:
+        st.caption(f"Facts export unavailable for this report ({type(_fe).__name__}).")
+
     with ex2:
         pptx_data = build_pptx_report(df, sold_df, metrics_bundle, chart_images,
                                       st.session_state.current_report_id,
@@ -3492,6 +4192,19 @@ if st.session_state.current_report_id is not None:
         st.download_button("📥 Download Sold List (CSV)", sold_df[['Dealer', 'Vehicle Name', 'VIN', 'Page Url', 'Attributed Unique Visitors']].to_csv(index=False), f"{st.session_state.current_report_id}_Sold.csv", "text/csv")
     with ex4:
         st.download_button("📥 Download Full Analysis (CSV)", df.to_csv(index=False), f"{st.session_state.current_report_id}_Full_Analysis.csv", "text/csv")
+
+    # Tucked away on purpose: this file is for the attribution report builder,
+    # not part of a rep's normal workflow.
+    with st.expander("🧩 Data export (for attribution reporting)", expanded=False):
+        if facts_bytes:
+            st.caption("Structured version of this report's figures, for combining with "
+                       "website attribution and Polk data.")
+            st.download_button("Download facts (.json)", data=facts_bytes,
+                               file_name=facts_name, mime="application/json")
+        else:
+            st.caption("Select the **report month** under 🗓️ Report Details in the "
+                       "sidebar to enable this export — the reporting period is needed "
+                       "to line this analysis up against website and Polk data.")
 
     st.divider()
     
