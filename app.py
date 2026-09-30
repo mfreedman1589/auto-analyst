@@ -3634,6 +3634,90 @@ if run_analysis_clicked:
     st.rerun()
 
 # --- SIDEBAR: SESSION HISTORY MANAGER ---
+# Sidebar tools that must be available BEFORE any report is run.
+with st.sidebar.expander("📊 Market Lookup Status", expanded=False):
+    st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
+    st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
+    st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
+    st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
+    if isinstance(st.session_state.get('mc_month_usage'), int):
+        cap_note = f" of `{MC_MONTH_CAP}` cap" if MC_MONTH_CAP else ""
+        st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}`{cap_note} (from report log)")
+    st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
+               "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
+
+with st.sidebar.expander("🧪 Market Lookup Diagnostic", expanded=False):
+    st.caption("Fires 5 tiny probes (5 lookups) to show which filters this API "
+               "key honors, plus a 1-call inventory test. Use a real dealer "
+               "domain and a VIN currently on their site.")
+    diag_domain = st.text_input("Dealer domain", value="hamby.com", key="mc_diag_dom")
+    diag_vin = st.text_input("A live VIN from that dealer", value="", key="mc_diag_vin")
+    if st.button("Run diagnostic", key="mc_diag_btn"):
+        dkey = get_marketcheck_key()
+        if not dkey:
+            st.error("No MarketCheck key configured.")
+        else:
+            import requests as _rq
+            probes = [("source= (rows=1)", {"source": diag_domain.strip()}),
+                      ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
+                                                          "rows": "50"}),
+                      ("vins=", {"vins": diag_vin.strip().upper()}),
+                      ("vin=", {"vin": diag_vin.strip().upper()}),
+                      # 1-call inventory test: zero listings, every VIN as a facet
+                      ("facets=vin (1-call inventory)", {"source": diag_domain.strip(),
+                                                         "rows": "0",
+                                                         "facets": "vin|0|1000"})]
+            # Second probe replicates the report's store call exactly:
+            # same params AND the same session construction.
+            _diag_sess = _rq.Session()
+            try:
+                _retry = Retry(total=3, backoff_factor=1,
+                               status_forcelist=[429, 500, 502, 503, 504])
+                _ad = HTTPAdapter(max_retries=_retry)
+                _diag_sess.mount('https://', _ad)
+            except Exception:
+                pass
+            for label, extra in probes:
+                if "vin" in label and not diag_vin.strip():
+                    st.markdown(f"**{label}** — skipped (no VIN entered)")
+                    continue
+                try:
+                    _getter = _diag_sess.get if "report-style" in label else _rq.get
+                    # Facets exist only on the search endpoint; test it there no
+                    # matter which endpoint the report is configured to use.
+                    _target = _MC_DEFAULT_ENDPOINT if "facets" in label else MC_ENDPOINT
+                    pr = _getter(_target, params={"api_key": dkey, "rows": "1",
+                                                  "start": "0", **extra}, timeout=20)
+                    if pr.status_code == 200:
+                        body = pr.json()
+                        nf = body.get("num_found", "?")
+                        if "facets" in label:
+                            fac = (body.get("facets") or {}).get("vin") or []
+                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`, "
+                                        f"VINs returned as facets = `{len(fac)}`")
+                            if fac and nf not in ("?", None) and len(fac) >= min(int(nf), 1000) * 0.9:
+                                st.caption("✅ Facets returned (nearly) the whole store in one "
+                                           "call — a 1-call inventory pull is viable for this "
+                                           "dealer.")
+                            elif fac:
+                                st.caption("Facets returned a partial list — MarketCheck caps "
+                                           "the facet length below this store's size.")
+                            else:
+                                st.caption("No VIN facets returned — this key/endpoint doesn't "
+                                           "support facets=vin.")
+                        else:
+                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
+                    else:
+                        st.markdown(f"**{label}** — HTTP {pr.status_code}: "
+                                    f"`{str(pr.text)[:120]}`")
+                except Exception as e:
+                    st.markdown(f"**{label}** — {type(e).__name__}: {str(e)[:120]}")
+                time.sleep(0.25)
+            st.caption("How to read this: a filter is honored when num_found is "
+                       "small (dealer-sized for source=, ~1-5 for vin=). A number "
+                       "in the millions means that filter is being ignored.")
+
+
 if st.session_state.history:
     st.sidebar.divider()
     st.sidebar.markdown("### 📂 Session History")
@@ -3652,88 +3736,6 @@ if st.session_state.history:
         
     st.sidebar.divider()
     st.sidebar.markdown(f"📈 **Total Global Scans:** `{st.session_state.global_usage_count}`")
-    with st.sidebar.expander("📊 Market Lookup Status", expanded=False):
-        st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
-        st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
-        st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
-        st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
-        if isinstance(st.session_state.get('mc_month_usage'), int):
-            cap_note = f" of `{MC_MONTH_CAP}` cap" if MC_MONTH_CAP else ""
-            st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}`{cap_note} (from report log)")
-        st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
-                   "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
-
-    with st.sidebar.expander("🧪 Market Lookup Diagnostic", expanded=False):
-        st.caption("Fires 3 tiny probes (~$0.01 total) to show which filters "
-                   "this API key honors on the current endpoint. Use a real "
-                   "dealer domain and a VIN currently on their site.")
-        diag_domain = st.text_input("Dealer domain", value="hamby.com", key="mc_diag_dom")
-        diag_vin = st.text_input("A live VIN from that dealer", value="", key="mc_diag_vin")
-        if st.button("Run diagnostic", key="mc_diag_btn"):
-            dkey = get_marketcheck_key()
-            if not dkey:
-                st.error("No MarketCheck key configured.")
-            else:
-                import requests as _rq
-                probes = [("source= (rows=1)", {"source": diag_domain.strip()}),
-                          ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
-                                                              "rows": "50"}),
-                          ("vins=", {"vins": diag_vin.strip().upper()}),
-                          ("vin=", {"vin": diag_vin.strip().upper()}),
-                          # 1-call inventory test: zero listings, every VIN as a facet
-                          ("facets=vin (1-call inventory)", {"source": diag_domain.strip(),
-                                                             "rows": "0",
-                                                             "facets": "vin|0|1000"})]
-                # Second probe replicates the report's store call exactly:
-                # same params AND the same session construction.
-                _diag_sess = _rq.Session()
-                try:
-                    _retry = Retry(total=3, backoff_factor=1,
-                                   status_forcelist=[429, 500, 502, 503, 504])
-                    _ad = HTTPAdapter(max_retries=_retry)
-                    _diag_sess.mount('https://', _ad)
-                except Exception:
-                    pass
-                for label, extra in probes:
-                    if "vin" in label and not diag_vin.strip():
-                        st.markdown(f"**{label}** — skipped (no VIN entered)")
-                        continue
-                    try:
-                        _getter = _diag_sess.get if "report-style" in label else _rq.get
-                        # Facets exist only on the search endpoint; test it there no
-                        # matter which endpoint the report is configured to use.
-                        _target = _MC_DEFAULT_ENDPOINT if "facets" in label else MC_ENDPOINT
-                        pr = _getter(_target, params={"api_key": dkey, "rows": "1",
-                                                      "start": "0", **extra}, timeout=20)
-                        if pr.status_code == 200:
-                            body = pr.json()
-                            nf = body.get("num_found", "?")
-                            if "facets" in label:
-                                fac = (body.get("facets") or {}).get("vin") or []
-                                st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`, "
-                                            f"VINs returned as facets = `{len(fac)}`")
-                                if fac and nf not in ("?", None) and len(fac) >= min(int(nf), 1000) * 0.9:
-                                    st.caption("✅ Facets returned (nearly) the whole store in one "
-                                               "call — a 1-call inventory pull is viable for this "
-                                               "dealer.")
-                                elif fac:
-                                    st.caption("Facets returned a partial list — MarketCheck caps "
-                                               "the facet length below this store's size.")
-                                else:
-                                    st.caption("No VIN facets returned — this key/endpoint doesn't "
-                                               "support facets=vin.")
-                            else:
-                                st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
-                        else:
-                            st.markdown(f"**{label}** — HTTP {pr.status_code}: "
-                                        f"`{str(pr.text)[:120]}`")
-                    except Exception as e:
-                        st.markdown(f"**{label}** — {type(e).__name__}: {str(e)[:120]}")
-                    time.sleep(0.25)
-                st.caption("How to read this: a filter is honored when num_found is "
-                           "small (dealer-sized for source=, ~1-5 for vin=). A number "
-                           "in the millions means that filter is being ignored.")
-
 # --- MAIN DASHBOARD DISPLAY ---
 def dismissible_notice(notice_key, body, icon="🗓️"):
     """
