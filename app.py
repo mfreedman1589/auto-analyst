@@ -609,24 +609,16 @@ def build_group_chart_images(dealer_group, top_n=10):
             continue
     return images
 
-def ltb_split_line(metrics):
-    """
-    The New vs Used sell-through comparison, stated plainly. Returns None when
-    either side has no viewed vehicles (a 0% there would mean "none on the
-    lot", not "none sold"). Gap is in percentage POINTS, never "% faster".
-    """
-    try:
-        if not metrics.get('new_viewed') or not metrics.get('used_viewed'):
-            return None
-        n = float(metrics['new_ltb']); u = float(metrics['used_ltb'])
-    except Exception:
-        return None
-    gap = abs(u - n)
-    head = f"Sell-through: Used {u:.1f}%  \u00b7  New {n:.1f}%"
-    if gap < 1.0:
-        return head + "  -  new and used are moving at about the same pace"
-    faster = "used" if u > n else "new"
-    return head + f"  -  {faster} inventory is moving {gap:.1f} points faster"
+def ltb_chip_text(metrics):
+    """The small 'New: x%  |  Used: y%' chip. Skips a side with no viewed
+    vehicles, so a used-only store never shows a misleading 'New: 0.0%'."""
+    parts = []
+    for label, key, n_key in (("New", 'new_ltb', 'new_viewed'), ("Used", 'used_ltb', 'used_viewed')):
+        n = metrics.get(n_key)
+        if n is None or n > 0:            # unknown count -> old behaviour
+            if metrics.get(key) is not None:
+                parts.append(f"{label}: {metrics[key]}%")
+    return "  |  ".join(parts) or None
 
 def build_kpi_band_image(metrics):
     """
@@ -649,6 +641,9 @@ def build_kpi_band_image(metrics):
                      color='white', fontsize=8.5, fontweight='bold')
             fig.text(x, 0.36, val, ha='center', va='center',
                      color='white', fontsize=21, fontweight='bold')
+        _chip = ltb_chip_text(metrics)
+        if _chip:
+            fig.text(3.5 / 4.0, 0.10, _chip, ha='center', va='center', color='#DDE3F8', fontsize=8)
         import matplotlib.lines as mlines
         for i in (1, 2, 3):
             fig.add_artist(mlines.Line2D([i / 4.0, i / 4.0], [0.18, 0.84],
@@ -802,6 +797,13 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
                                               if len(pool) else None)
         block[f'vehicles_sold_{label}'] = len(hit) if len(hit) else None
 
+    # New vs Used sell-through gap, for the report builder to state in prose.
+    # Signed percentage POINTS (used minus new); only when both sides exist.
+    _n, _u = block.get('look_to_book_pct_new'), block.get('look_to_book_pct_used')
+    if _n is not None and _u is not None:
+        block['look_to_book_gap_pts'] = round(_u - _n, 1)
+        block['faster_condition'] = ('USED' if _u - _n >= 1.0 else
+                                     'NEW' if _n - _u >= 1.0 else 'EVEN')
     block['est_revenue_sold'] = _num(scope_sold['Est. Value'].sum()) if sold_n else None
     block['est_pipeline_value'] = _num(scope_vdp['Est. Value'].sum()) if shopped else None
     # v2: the part of the shopped value still listed for sale. Unconfirmed
@@ -1234,16 +1236,15 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                  align=PP_ALIGN.CENTER)
         add_text(s1, cx, y0 + Inches(0.8), card_w, Inches(0.9), val, 30, WHITE,
                  bold=True, align=PP_ALIGN.CENTER)
-    _split = ltb_split_line(metrics)
-    if _split:
-        # Leads the slide: used vs new sell-through and the gap, plainly.
-        add_text(s1, Inches(0.5), Inches(4.85), Inches(12.3), Inches(0.42),
-                 _split, 16, NAVY, bold=True, align=PP_ALIGN.CENTER)
+    _chip = ltb_chip_text(metrics)
+    if _chip:
+        add_text(s1, x0 + 3 * (card_w + gap), y0 + card_h + Inches(0.08),
+                 card_w, Inches(0.4), _chip, 11, GREY, align=PP_ALIGN.CENTER)
     if ctx.get('threshold_line'):
         # Sits directly under the KPI cards: it qualifies those numbers.
-        add_text(s1, Inches(0.5), Inches(5.4), Inches(12.3), Inches(0.32),
+        add_text(s1, Inches(0.5), Inches(5.12), Inches(12.3), Inches(0.32),
                  ctx['threshold_line'], 12, NAVY, align=PP_ALIGN.CENTER)
-    add_text(s1, Inches(0.5), Inches(5.85), Inches(12.3), Inches(0.5),
+    add_text(s1, Inches(0.5), Inches(5.62), Inches(12.3), Inches(0.5),
              "Look-to-Book = viewed vehicles sold / all viewed vehicles - how "
              "quickly the inventory our audience engaged with is moving.", 12, GREY, italic=True,
              align=PP_ALIGN.CENTER)
@@ -1508,11 +1509,6 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             except Exception: pass
             band_done = True
             pdf.ln(2)
-            _split = ltb_split_line(metrics)
-            if _split:
-                pdf.set_font("Arial", "B", 11)
-                pdf.set_text_color(10, 31, 92)
-                pdf.cell(0, 7, safe_str(_split.replace("\u00b7", "|")), ln=True, align="C")
             if _ctx.get('threshold_line'):
                 pdf.set_font("Arial", "", 9)
                 pdf.set_text_color(10, 31, 92)
@@ -4362,12 +4358,10 @@ if st.session_state.current_report_id is not None:
     m1.metric("Viewed Vehicles Sold", m_units, help="Vehicles our campaign audience viewed that have since left the lot - influence and velocity, not purchases by our visitors.")
     m2.metric("Est. Value Sold", f"${m_rev:,.0f}")
     m3.metric("Est. Total Value Viewed", f"${m_pipe:,.0f}", help="Estimated value of every vehicle our audience viewed - sold, still listed, and unconfirmed. Sizes the in-market demand the campaign reached.")
-    m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%")
-    _split = ltb_split_line({'new_ltb': new_ltb, 'used_ltb': used_ltb,
-                             'new_viewed': len(new_vdp_all), 'used_viewed': len(used_vdp_all)})
-    if _split:
-        st.markdown(f"<div style='text-align:center; font-size:18px; font-weight:700; "
-                    f"color:#0A1F5C; margin:6px 0 2px;'>{_split}</div>", unsafe_allow_html=True)
+    _chip = ltb_chip_text({'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}",
+                           'new_viewed': len(new_vdp_all), 'used_viewed': len(used_vdp_all)})
+    m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%",
+              delta=_chip.replace("  |  ", " | ") if _chip else None, delta_color="off")
 
     # Optional reporting context (sidebar → "Report Details").
     report_ctx = _pre_ctx
