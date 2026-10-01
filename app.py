@@ -118,6 +118,28 @@ def load_vault():
         except Exception:
             pass
 
+        # Client-facing dealer names (tab "DealerNames": Domain, Display Name).
+        # Best-effort: a missing tab just means names fall back to the domain.
+        try:
+            names_df = conn.read(worksheet="DealerNames", ttl=60)
+            names, flags = {}, {}
+            for _, r in names_df.iterrows():
+                dom = str(r.get("Domain", "") or "").strip().lower()
+                dom = re.sub(r'^https?://', '', dom).replace("www.", "").split("/")[0]
+                disp = str(r.get("Display Name", "") or "").strip()
+                if dom and disp and disp.lower() != "nan":
+                    names[dom] = disp
+                # Optional column: set it only when the automatic call is wrong.
+                g = str(r.get("Is Group Site", "") or "").strip().lower()
+                if dom and g in ("true", "yes", "y", "1"):
+                    flags[dom] = True
+                elif dom and g in ("false", "no", "n", "0"):
+                    flags[dom] = False
+            st.session_state.dealer_display_names = names
+            st.session_state.dealer_group_flags = flags
+        except Exception:
+            st.session_state.setdefault("dealer_display_names", {})
+
         return vault_dict, vault_df, conn, True
     except Exception:
         return dict(FALLBACK_VAULT), None, None, False
@@ -554,7 +576,7 @@ def build_group_chart_images(dealer_group, top_n=10):
     if dealer_group is None or dealer_group.empty:
         return images
     specs = [('group_traffic', 'Total Visitors', 'Top Dealers by Traffic', PREMION_BLUE),
-             ('group_sales', 'Units Sold', 'Top Dealers by Attributed Sales', PREMION_BLUE)]
+             ('group_sales', 'Units Sold', 'Top Dealers by Shopped Vehicles Sold', PREMION_BLUE)]
     for key, col, title, color in specs:
         try:
             if col not in dealer_group.columns:
@@ -597,9 +619,9 @@ def build_kpi_band_image(metrics):
         fig = plt.figure(figsize=(10.6, 1.6))
         fig.patch.set_facecolor(PREMION_NAVY)
         kpis = [
-            ("UNITS SOLD (ATTRIBUTED)", str(metrics.get('units_sold', 0))),
-            ("EST. REVENUE SOLD", f"${float(metrics.get('rev_sold', 0)):,.0f}"),
-            ("TOTAL PIPELINE VALUE", f"${float(metrics.get('pipeline', 0)):,.0f}"),
+            ("SHOPPED VEHICLES SOLD", str(metrics.get('units_sold', 0))),
+            ("EST. VALUE OF SHOPPED\nVEHICLES SOLD", f"${float(metrics.get('rev_sold', 0)):,.0f}"),
+            ("TOTAL SHOPPED VALUE", f"${float(metrics.get('pipeline', 0)):,.0f}"),
             ("LOOK-TO-BOOK RATIO", f"{metrics.get('ltb', 0)}%"),
         ]
         for i, (lab, val) in enumerate(kpis):
@@ -624,7 +646,47 @@ def build_kpi_band_image(metrics):
     except Exception:
         return None
 
-FACTS_SCHEMA_VERSION = 1
+# One client-facing glossary, used by both the PDF and the PowerPoint so the
+# wording can't drift. Positioning rule: we INFLUENCE these sales (qualified
+# shoppers into the pipeline, faster velocity); we don't claim the purchases.
+CLIENT_GLOSSARY = [
+    ("Shopped Vehicles Sold",
+     "Vehicles our campaign audience shopped that have since left the dealer's live "
+     "inventory. They show the campaign sending qualified shoppers into the pipeline "
+     "and the pace that inventory is moving - not purchases made by our visitors."),
+    ("Est. Value of Shopped Vehicles Sold",
+     "Directional value of the shopped vehicles that sold. New: base MSRP for the "
+     "model. Used: base MSRP depreciated by age (15% year one, 10% each following "
+     "year). Not transaction prices; excludes trims, options, and dealer markups."),
+    ("Total Shopped Value",
+     "The estimated value of every vehicle our audience shopped - sold, still listed, "
+     "and unconfirmed - using the same method. It sizes the in-market demand the "
+     "campaign reached."),
+    ("Est. Value Still on the Lot",
+     "The estimated value of the shopped vehicles still listed for sale - the part of "
+     "Total Shopped Value that hasn't sold yet. Vehicles whose status couldn't be "
+     "confirmed are left out."),
+    ("Look-to-Book Ratio",
+     "Shopped vehicles sold / all shopped vehicles, split New vs Used - how quickly "
+     "the inventory our audience engaged with is moving."),
+    ("Traffic Mix",
+     "Where audiences navigated on the site: VDPs, Service, Search, Incentives/Offers, "
+     "Homepage."),
+    ("Missed Opportunities (The Watch List)",
+     "Active vehicles receiving above-average campaign traffic that haven't sold yet. "
+     "Review these VDPs for missing photos, 'Call for Price' buttons, or pricing outliers."),
+    ("Methodology Note",
+     "Sold-vehicle counts reflect inventory our audience shopped that has since left "
+     "the lot; they indicate influence and velocity, not purchases by our visitors. "
+     "Inventory status reflects the dealer's website when this report was run, not a "
+     "historical snapshot."),
+]
+
+FACTS_SCHEMA_VERSION = 2
+# Working benchmark: on average a vehicle draws at least this many qualified
+# (attributed) VDP visitors before it sells. Used to flag the sold vehicles
+# where campaign influence is most likely.
+INFLUENCE_BENCHMARK_VISITS = 30
 APP_BUILD = "2026.09.23"   # bump on release; surfaced in the facts export
 
 # Makes whose names are more than one word, so "make" can be split off the
@@ -721,6 +783,11 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
 
     block['est_revenue_sold'] = _num(scope_sold['Est. Value'].sum()) if sold_n else None
     block['est_pipeline_value'] = _num(scope_vdp['Est. Value'].sum()) if shopped else None
+    # v2: the part of the shopped value still listed for sale. Unconfirmed
+    # vehicles are excluded — we don't know they're still on the lot.
+    _still_listed = scope_vdp[scope_vdp['Sold_Status'].astype(str) == 'Available']
+    block['est_unsold_value'] = (_num(_still_listed['Est. Value'].sum())
+                                 if len(_still_listed) else None)
     block['avg_sold_price_est'] = _num(scope_sold['Est. Value'].mean()) if sold_n else None
     # days_on_lot / body_style are not computed by this app -> intentionally absent
 
@@ -759,6 +826,50 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
         block['top_sellers'] = None
         block['sold_by_price_tier'] = None
 
+    # ---- v2: what the audience SHOPPED (not just what sold) ----
+    if shopped:
+        tiers_all = scope_vdp['Price Tier'].fillna('Unknown').astype(str).value_counts()
+        block['shopped_by_price_tier'] = [
+            {'tier': _slug(k).upper().replace('-', '_'), 'label': str(k), 'count': int(v)}
+            for k, v in tiers_all.items()] or None
+        shop_models = {}
+        for _, r in scope_vdp.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            if mk and md:
+                ent = shop_models.setdefault((mk, md), {'count': 0, 'raw': raw})
+                ent['count'] += 1
+        rows_s = []
+        for (mk, md), ent in sorted(shop_models.items(), key=lambda kv: -kv[1]['count']):
+            row = {'make': mk, 'model': md, 'label': f"{mk} {md}", 'count': ent['count']}
+            if ent['raw'] and ent['raw'].upper() != f"{mk} {md}":
+                row['raw_name'] = ent['raw']
+            rows_s.append(row)
+        block['shopped_by_make_model'] = rows_s or None
+
+    # ---- v2: influence evidence on the sold units ----
+    if sold_n:
+        sv = pd.to_numeric(scope_sold['Attributed Unique Visitors'], errors='coerce').dropna()
+        # A measured count: 0 here means "no sold vehicle reached the benchmark",
+        # which is a real finding, so it's emitted rather than omitted.
+        block['sold_above_benchmark'] = int((sv >= INFLUENCE_BENCHMARK_VISITS).sum())
+        if len(sv):
+            block['sold_visits_distribution'] = {
+                'min': _num(sv.min()), 'median': _num(sv.median()), 'max': _num(sv.max())}
+        top = scope_sold.assign(_v=pd.to_numeric(scope_sold['Attributed Unique Visitors'],
+                                                 errors='coerce')).sort_values('_v', ascending=False).head(10)
+        units = []
+        for _, r in top.iterrows():
+            mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            u = {'make': mk, 'model': md,
+                 'label': f"{mk} {md}" if mk and md else (raw or None),
+                 'attributed_visits': _num(r.get('Attributed Unique Visitors')),
+                 'est_value': _num(r.get('Est. Value'))}
+            vin = str(r.get('VIN') or '').strip()
+            if vin and vin.upper() not in ('N/A', 'NAN'):
+                u['vin'] = vin
+            units.append({k: v for k, v in u.items() if v is not None})
+        block['top_sold_units'] = units or None
+
     # Status of the shopped vehicles only — NOT the dealer's full inventory.
     statuses = scope_vdp['Sold_Status'].astype(str)
     avail = int((statuses == 'Available').sum())
@@ -779,13 +890,16 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
         veh = []
         for _, r in scope_missed.iterrows():
             mk, md, raw = split_make_model(r.get('Vehicle Name'))
+            av = _num(r.get('Attributed Unique Visitors'))
             item = {'make': mk, 'model': md,
                     'label': f"{mk} {md}" if mk and md else (raw or None),
-                    'visits': _num(r.get('Attributed Unique Visitors'))}
+                    'visits': av,               # v1 name, kept for v1 readers
+                    'attributed_visits': av,
+                    'est_value': _num(r.get('Est. Value'))}
             vin = str(r.get('VIN') or '').strip()
-            if vin and vin.upper() != 'N/A':
+            if vin and vin.upper() not in ('N/A', 'NAN'):
                 item['vin'] = vin
-            veh.append(item)
+            veh.append({k: v for k, v in item.items() if v is not None})
         block['missed_opportunities'] = {'count': len(veh), 'vehicles': veh}
     else:
         block['missed_opportunities'] = None
@@ -844,6 +958,8 @@ def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
         if domain:
             site['domain'] = domain
             site['url'] = f"https://www.{domain}/"
+            site['is_group_site'] = bool(is_group_site_url(
+                f"https://{domain}/", df['Dealer'].nunique() > 1))
         if brands:
             # Derived from the makes actually sold in this report, not a
             # franchise list the app holds.
@@ -860,6 +976,7 @@ def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
         'inventory_scanned_at': scan_dt.date().isoformat(),
         'analysis_period': period,
         'vdp_visit_threshold': _num(metrics.get('min_visitors')),
+        'influence_benchmark_visits': INFLUENCE_BENCHMARK_VISITS,
     }
     if is_group:
         meta['group_name'] = str(report_id)
@@ -1052,14 +1169,14 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
              ctx.get('header_meta') or report_date, 12, PERI)
     add_text(s1, Inches(0.5), Inches(1.75), Inches(12.3), Inches(0.5),
              "Complementary to your website attribution: the vehicles our audience "
-             "shopped that have since moved off the lot.", 13, GREY, italic=True)
+             "shopped and how quickly that inventory is moving.", 13, GREY, italic=True)
 
     units_val = metrics.get('units_sold', metrics.get('units', 0))
     rev_val = metrics.get('rev_sold', metrics.get('revenue', 0))
     ltb_val = metrics.get('ltb', 0)
-    kpis = [("Units Sold (Attributed)", str(units_val)),
-            ("Est. Revenue Sold", _fmt_money(rev_val)),
-            ("Total Pipeline Value", _fmt_money(metrics.get('pipeline', 0))),
+    kpis = [("Shopped Vehicles Sold", str(units_val)),
+            ("Est. Value of Shopped Vehicles Sold", _fmt_money(rev_val)),
+            ("Total Shopped Value", _fmt_money(metrics.get('pipeline', 0))),
             ("Look-to-Book Ratio", f"{ltb_val}%")]
     card_w = Inches(2.9); card_h = Inches(1.9); gap = Inches(0.28)
     total_w = card_w * 4 + gap * 3
@@ -1082,8 +1199,8 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         add_text(s1, Inches(0.5), Inches(5.12), Inches(12.3), Inches(0.32),
                  ctx['threshold_line'], 12, NAVY, align=PP_ALIGN.CENTER)
     add_text(s1, Inches(0.5), Inches(5.62), Inches(12.3), Inches(0.5),
-             "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion "
-             "velocity of the inventory we advertised.", 12, GREY, italic=True,
+             "Look-to-Book = shopped vehicles sold / all shopped vehicles - how "
+             "quickly the inventory our audience engaged with is moving.", 12, GREY, italic=True,
              align=PP_ALIGN.CENTER)
     add_footer(s1)
 
@@ -1124,7 +1241,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
 
     # --- Slide 3: Top Sold ---
     if sold_df is not None and not sold_df.empty:
-        s3 = new_slide("Top Sold: Proof of Inventory Movement")
+        s3 = new_slide("Top Sold: What Our Audience Shopped That Sold")
         top_models = _model_counts(sold_df, 'Units Sold')
         if not top_models.empty:
             add_text(s3, Inches(0.5), Inches(1.35), Inches(4.6), Inches(0.4),
@@ -1187,7 +1304,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                 title += f" ({page + 1} of {n_pages})"
             sg = new_slide(title)
             chunk = group_rows.iloc[page * per_slide:(page + 1) * per_slide]
-            rows = [["Dealer", "Traffic", "VDPs", "Sold", "LTB", "Est. Rev Sold", "Pipeline"]]
+            rows = [["Dealer", "Traffic", "VDPs", "Sold", "LTB", "Est. Value Sold", "Shopped Value"]]
             for _, r in chunk.iterrows():
                 rows.append([str(r['Dealer'])[:32], str(r['Total Visitors']),
                              str(r['VDPs Shopped']), str(r['Units Sold']),
@@ -1209,8 +1326,8 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
             add_text(sd, Inches(0.5), Inches(1.25), Inches(12.3), Inches(0.4),
                      f"Traffic: {grow['Total Visitors']}   |   VDPs Shopped: {grow['VDPs Shopped']}   |   "
                      f"Units Sold: {grow['Units Sold']}   |   LTB: {grow['Look-to-Book (%)']}%   |   "
-                     f"Est. Rev Sold: {_fmt_money(grow['Est. Rev Sold'])}   |   "
-                     f"Pipeline: {_fmt_money(grow['Pipeline Value'])}",
+                     f"Est. Value Sold: {_fmt_money(grow['Est. Rev Sold'])}   |   "
+                     f"Shopped Value: {_fmt_money(grow['Pipeline Value'])}",
                      12, NAVY, bold=True)
             # Row 1: aggregated model roll-ups (mirrors the dashboard + PDF).
             d_sold_models = _model_counts(d_sold, 'Units Sold') if not d_sold.empty else pd.DataFrame()
@@ -1261,23 +1378,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
 
     # --- Glossary & Methodology ---
     sg2 = new_slide("Glossary & Methodology")
-    glossary = [
-        ("Units Sold (Attributed)",
-         "Vehicles removed from the dealer's live inventory after receiving attributed campaign traffic."),
-        ("Est. Revenue Sold / Pipeline Value",
-         "Directional estimates. New: base MSRP for the model. Used: base MSRP depreciated by age "
-         "(15% year 1, 10% each following year). Not exact transaction prices."),
-        ("Look-to-Book Ratio",
-         "Sold VDPs / Total Active VDPs - the conversion velocity of the inventory, split New vs Used."),
-        ("Traffic Mix",
-         "Where audiences navigated on the site: VDPs, Service, Search, Incentives/Offers, Homepage."),
-        ("Missed Opportunities (Watch List)",
-         "Active vehicles with above-average traffic that haven't sold - flags potential pricing or "
-         "merchandising issues."),
-        ("Methodology Note",
-         "Inventory status reflects the dealer's website at the moment this report was run, not a "
-         "historical snapshot."),
-    ]
+    glossary = CLIENT_GLOSSARY
     tb = sg2.shapes.add_textbox(Inches(0.6), Inches(1.5), Inches(12.1), Inches(5.2))
     tf = tb.text_frame; tf.word_wrap = True
     first = True
@@ -1363,16 +1464,16 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 pdf.cell(0, 5, safe_str(_ctx['threshold_line']), ln=True, align="C")
             pdf.set_font("Arial", "I", 8)
             pdf.set_text_color(90, 90, 90)
-            pdf.cell(0, 5, "Look-to-Book = Sold VDPs / Total Active VDPs - the conversion velocity of the inventory we advertised.", ln=True, align="C")
+            pdf.cell(0, 5, "Look-to-Book = shopped vehicles sold / all shopped vehicles - how quickly the inventory our audience engaged with is moving.", ln=True, align="C")
             pdf.set_text_color(0, 0, 0)
         except Exception:
             band_done = False
     if not band_done:
         pdf.set_font("Arial", "", 12)
         col_width = pdf.w / 2.2
-        pdf.cell(col_width, 8, f"Total Units Sold: {metrics['units_sold']}", border=0)
-        pdf.cell(col_width, 8, f"Est. Revenue Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
-        pdf.cell(col_width, 8, f"Pipeline Value: ${metrics['pipeline']:,.0f}", border=0)
+        pdf.cell(col_width, 8, f"Shopped Vehicles Sold: {metrics['units_sold']}", border=0)
+        pdf.cell(col_width, 8, f"Est. Value Sold: ${metrics['rev_sold']:,.0f}", border=0, ln=True)
+        pdf.cell(col_width, 8, f"Total Shopped Value: ${metrics['pipeline']:,.0f}", border=0)
         pdf.cell(col_width, 8, f"Look-to-Book Ratio: {metrics['ltb']}%", border=0, ln=True)
         pdf.set_font("Arial", "I", 10)
         pdf.cell(col_width, 6, "", border=0)
@@ -1432,11 +1533,15 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 pass
 
         thead([(50, "Dealer Name"), (18, "Traffic"), (15, "VDPs"), (15, "Sold"),
-               (15, "LTB"), (35, "Est. Rev Sold"), (35, "Pipeline Value")])
+               (15, "LTB"), (35, "Est. Value Sold"), (35, "Shopped Value")])
         
         pdf.set_font("Arial", "", 8)
         for _, row in dealer_group.head(15).iterrows():
-            pdf.cell(50, 8, safe_str(row['Dealer'])[:28], border=1)
+            _dn = safe_str(row['Dealer'])
+            if len(_dn) > 28:
+                pdf.set_font("Arial", "", 7)
+            pdf.cell(50, 8, _dn[:40], border=1)
+            pdf.set_font("Arial", "", 8)
             pdf.cell(18, 8, str(row['Total Visitors']), border=1)
             pdf.cell(15, 8, str(row['VDPs Shopped']), border=1)
             pdf.cell(15, 8, str(row['Units Sold']), border=1)
@@ -1754,20 +1859,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(0, 10, " Glossary & Methodology", ln=True, fill=True)
     pdf.ln(4)
-    glossary_items = [
-        ("Units Sold (Attributed)",
-         "Vehicles removed from the dealer's live inventory after receiving attributed campaign traffic."),
-        ("Est. Revenue Sold / Pipeline Value",
-         "Directional value estimates. New: base MSRP for the model. Used: base MSRP depreciated by age (15% year 1, 10% each following year). Not exact transaction prices; excludes trims, options, and dealer markups."),
-        ("Look-to-Book Ratio",
-         "Sold VDPs / Total Active VDPs - the conversion velocity of the inventory, split by New vs Used."),
-        ("Traffic Mix",
-         "Where audiences navigated on the site: VDPs, Service, Search, Incentives/Offers, Homepage."),
-        ("Missed Opportunities (The Watch List)",
-         "Active vehicles receiving above-average traffic that haven't sold yet. Review these VDPs for missing photos, 'Call for Price' buttons, or pricing outliers."),
-        ("Methodology Note",
-         "Inventory status reflects the dealer's website at the moment this report was run, not a historical snapshot."),
-    ]
+    glossary_items = CLIENT_GLOSSARY
     for g_head, g_body in glossary_items:
         pdf.set_font("Arial", "B", 10)
         pdf.cell(0, 7, safe_str(g_head), ln=True)
@@ -1950,6 +2042,107 @@ def smart_dealer_name(url, is_multi=False):
             s += " (Group/Central Site)"
             
     return s
+
+def _dealer_domain(url):
+    u = str(url).lower()
+    if not u.startswith('http'):
+        u = 'http://' + u
+    return re.sub(r'^(www\.)', '', urlparse(u).netloc)
+
+_BRAND_WORDS = ['honda', 'toyota', 'ford', 'chevrolet', 'chevy', 'nissan', 'jeep', 'chrysler',
+                'dodge', 'ram', 'hyundai', 'kia', 'vw', 'volkswagen', 'bmw', 'mercedes', 'audi',
+                'lexus', 'acura', 'infiniti', 'subaru', 'mazda', 'volvo', 'porsche', 'buick', 'gmc',
+                'cadillac', 'lincoln', 'mitsubishi', 'genesis', 'land rover', 'jaguar', 'mini']
+
+def is_group_site_url(url, is_multi=False):
+    """
+    True when this site is a group/central site rather than a single rooftop.
+    Order of evidence:
+      1. the "Is Group Site" column in the DealerNames tab, if filled in;
+      2. the dealer's real name (sheet or its own website): a brand in the
+         name means a rooftop ("Ted Britt Ford of Chantilly"); "Group" or
+         "Dealerships" means a group site; any other named store (a truck or
+         collision center) is a rooftop;
+      3. only with no name at all, the old guess from the domain.
+    """
+    dom = _dealer_domain(url)
+    flags = st.session_state.get("dealer_group_flags") or {}
+    if dom in flags:
+        return bool(flags[dom])
+    names = st.session_state.get("dealer_display_names") or {}
+    nm = names.get(dom) or HARVESTED_DEALER_NAMES.get(dom)
+    if nm:
+        low = nm.lower()
+        if any(re.search(r'\b' + re.escape(b) + r'\b', low) for b in _BRAND_WORDS):
+            return False
+        return bool(re.search(r'\b(group|dealerships|auto group|automotive group)\b', low))
+    return "(Group/Central Site)" in smart_dealer_name(url, is_multi)
+
+def dealer_display_name(url, is_multi=False):
+    """
+    Client-facing dealer name. Uses the DealerNames sheet tab when the domain is
+    listed (spelled the way the client spells it); otherwise falls back to the
+    name derived from the domain, WITHOUT the "(Group/Central Site)" marker —
+    that's carried separately as is_group_site.
+    """
+    names = st.session_state.get("dealer_display_names") or {}
+    dom = _dealer_domain(url)
+    keys = (dom, re.sub(r'^(shop\.|inventory\.|cars\.)', '', dom))
+    for key in keys:                       # 1. DealerNames sheet override
+        if key in names:
+            return names[key]
+    for key in keys:                       # 2. the dealer's own site
+        if key in HARVESTED_DEALER_NAMES:
+            return HARVESTED_DEALER_NAMES[key]
+    # 3. derived from the domain, without the group-site marker
+    return smart_dealer_name(url, is_multi).replace(" (Group/Central Site)", "").strip()
+
+def harvest_names_for_unnamed(urls, session, timeout=8):
+    """
+    Dealers with traffic but no vehicle pages (a truck or service center) never
+    had a page fetched during the scan, so there's nothing to read a name from.
+    Fetch their homepage once. Skips any dealer already named by the sheet or
+    the scan, so normal dealers cost nothing extra.
+    """
+    names = st.session_state.get("dealer_display_names") or {}
+    seen = set()
+    for u in urls:
+        dom = _dealer_domain(u)
+        if not dom or dom in seen or dom in names or dom in HARVESTED_DEALER_NAMES:
+            continue
+        seen.add(dom)
+        try:
+            r = session.get(f"https://{dom}/", timeout=timeout, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"})
+            if r.status_code == 200 and r.text:
+                nm = harvest_dealer_name_from_html(r.text, BeautifulSoup(r.text, 'html.parser'), dom)
+                if nm:
+                    HARVESTED_DEALER_NAMES[dom] = nm
+        except Exception:
+            continue
+
+def resolve_dealer_names(urls, is_multi=False):
+    """
+    domain -> display name for a run. If two different domains resolve to the
+    same name (e.g. a group site and a rooftop both self-describe as the
+    group), those domains fall back to their domain-derived names so the
+    stores are never merged into one row.
+    """
+    by_dom = {}
+    for u in urls:
+        d = _dealer_domain(u)
+        if d and d not in by_dom:
+            by_dom[d] = (u, dealer_display_name(u, is_multi))
+    counts = {}
+    for _d, (_u, n) in by_dom.items():
+        counts[n] = counts.get(n, 0) + 1
+    out = {}
+    for d, (u, n) in by_dom.items():
+        if counts[n] > 1:
+            n = smart_dealer_name(u, is_multi).replace(" (Group/Central Site)", "").strip()
+        out[d] = n
+    return out
 
 def clean_name_universal(url):
     year = get_year(url)
@@ -2176,6 +2369,36 @@ def get_marketcheck_key():
 #   MARKETCHECK_BUDGET = 75, MARKETCHECK_MONTHLY_CAP = 450
 # On PAID tiers keep the default below (search endpoint, pennies per run).
 _MC_DEFAULT_ENDPOINT = "https://api.marketcheck.com/v2/search/car/active"
+
+def get_admin_key():
+    """Admin unlock key from settings (ADMIN_KEY). Empty if not configured."""
+    try:
+        return str(_find_secret(st.secrets, "ADMIN_KEY") or "").strip()
+    except Exception:
+        return ""
+
+def is_admin():
+    """
+    Admin-only panels (lookup status, diagnostic, data export) stay hidden
+    from reps. Unlock for a session via the sidebar Admin box, or by opening
+    the app with ?admin=<ADMIN_KEY> in the URL.
+    """
+    if st.session_state.get("_is_admin"):
+        return True
+    key = get_admin_key()
+    if not key:
+        return False
+    try:
+        qp = st.query_params.get("admin")
+        if isinstance(qp, list):
+            qp = qp[0] if qp else None
+        if qp and str(qp) == key:
+            st.session_state["_is_admin"] = True
+            return True
+    except Exception:
+        pass
+    return False
+
 def _mc_endpoint():
     try:
         v = str(_find_secret(st.secrets, "MARKETCHECK_ENDPOINT")).strip()
@@ -2611,7 +2834,7 @@ def _mc_band(domain, api_key, session, band_items, out):
     for yr, its in per_year.items():
         _mc_resolve_year(domain, api_key, session, yr, its, out)
 
-def _mc_vin_batch(chunk, api_key, session):
+def _mc_vin_batch(chunk, api_key, session, domain=None):
     """
     One vins= batch lookup for [(url, vin)]. Returns ({url: status}, error).
     error is None on success; a string when the filter isn't honored or the
@@ -2619,6 +2842,8 @@ def _mc_vin_batch(chunk, api_key, session):
     """
     params = {"api_key": api_key, "vins": ",".join(v for _, v in chunk),
               "rows": "50", "start": "0"}
+    if domain:
+        params["source"] = domain
     r = session.get(MC_ENDPOINT, params=params, timeout=25)
     if r.status_code != 200:
         try:
@@ -2655,13 +2880,18 @@ def _mc_vin_batch(chunk, api_key, session):
     return ({u: ("Available" if v in active else "SOLD (Not in Market Inventory)")
              for u, v in chunk}, None)
 
-def _mc_vin_single(url, vin, api_key, session):
+def _mc_vin_single(url, vin, api_key, session, domain=None):
     """
-    One vin= lookup. Returns (status_or_None, error). num_found for a single
-    VIN must be tiny; a huge count means the filter is ignored -> error.
+    One vin= lookup, scoped to the dealer's domain. The free plan REQUIRES a
+    source/dealer scope on this endpoint (a bare vin= is rejected with 400),
+    and scoping is sharper anyway: "this VIN at this dealer".
+    Returns (status_or_None, error). num_found for a single VIN must be tiny;
+    a huge count means the filter is ignored -> error.
     """
-    r = session.get(MC_ENDPOINT, params={"api_key": api_key, "vin": vin,
-                                         "rows": "10", "start": "0"}, timeout=25)
+    params = {"api_key": api_key, "vin": vin, "rows": "10", "start": "0"}
+    if domain:
+        params["source"] = domain
+    r = session.get(MC_ENDPOINT, params=params, timeout=25)
     if r.status_code != 200:
         try:
             body = str(r.text)[:160]
@@ -2706,7 +2936,7 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None, out=None):
         chunk = valid[i:i + CHUNK]
         if mode in (None, "batch"):
             try:
-                res, err = _mc_vin_batch(chunk, api_key, session)
+                res, err = _mc_vin_batch(chunk, api_key, session, domain=domain)
             except _MCStop:
                 raise
             except Exception as e:
@@ -2725,7 +2955,7 @@ def _mc_resolve_vins(domain, items, api_key, session, cache_out=None, out=None):
         # Per-VIN mode (fallback)
         for u, v in chunk:
             try:
-                status, err = _mc_vin_single(u, v, api_key, session)
+                status, err = _mc_vin_single(u, v, api_key, session, domain=domain)
             except _MCStop:
                 raise
             except Exception as e:
@@ -2990,6 +3220,85 @@ _VIN_PATTERNS = [
     r'\bVIN\b[\s:#]*([A-HJ-NPR-Z0-9]{17})\b',
 ]
 
+# Dealer names read off the dealers' own pages during the scan (domain -> name).
+HARVESTED_DEALER_NAMES = {}
+
+_GENERIC_NAMES = {"home", "homepage", "new inventory", "used inventory", "inventory",
+                  "vehicle details", "dealer.com", "dealer inspire", "dealerinspire",
+                  "cars.com", "dealeron", "page not found", "404", "search results"}
+_DEALER_TYPES = {"autodealer", "automotivebusiness", "localbusiness", "organization",
+                 "cardealer", "autorepair"}
+
+def _name_matches_domain(name, domain):
+    """A real dealer name shares a distinctive word with its own domain
+    ("Ted Britt Ford of Chantilly" ~ tedbrittchantilly.com). Stops us picking up
+    a platform name, an OEM name, or page furniture instead."""
+    core = re.sub(r'[^a-z0-9]', '', domain.split('.')[0].lower())
+    words = [w for w in re.findall(r'[a-z0-9]+', name.lower()) if len(w) >= 4]
+    skip = {"ford", "chevrolet", "toyota", "honda", "nissan", "lincoln", "acura", "lexus",
+            "subaru", "hyundai", "mazda", "dodge", "chrysler", "jeep", "cadillac", "buick",
+            "motors", "auto", "automotive", "group", "cars", "sales", "dealer", "dealership"}
+    return any(w in core for w in words if w not in skip)
+
+def _clean_dealer_name(n):
+    n = re.sub(r'\s+', ' ', str(n or '')).strip(' |-–—:')
+    if n.isupper() and len(n) > 4:
+        n = n.title()
+    return n
+
+def harvest_dealer_name_from_html(text, soup, domain):
+    """
+    The dealership's own name from its page, most authoritative source first:
+    schema.org dealer/seller markup, then og:site_name, then the <title>.
+    Returns a validated name or None — never a guess.
+    """
+    cands = []
+    try:
+        if soup is not None:
+            for tag in soup.find_all('script', type='application/ld+json'):
+                try:
+                    blob = json.loads(tag.string or tag.get_text() or '')
+                except Exception:
+                    continue
+                stack = blob if isinstance(blob, list) else [blob]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, list):
+                        stack.extend(node); continue
+                    if not isinstance(node, dict):
+                        continue
+                    t = node.get('@type')
+                    types = {str(x).lower() for x in (t if isinstance(t, list) else [t])}
+                    if types & _DEALER_TYPES and node.get('name'):
+                        cands.append(node['name'])
+                    for k in ('seller', 'offers', '@graph', 'provider', 'brand'):
+                        if k in node:
+                            stack.append(node[k])
+            og = soup.find('meta', attrs={'property': 'og:site_name'})
+            if og and og.get('content'):
+                cands.append(og['content'])
+            if soup.title and soup.title.string:
+                for seg in re.split(r'\s[|\-–—:]\s', soup.title.string):
+                    cands.append(seg)
+    except Exception:
+        pass
+    # Pick the candidate that explains the MOST of the domain, not merely the
+    # first one sharing a word with it: in "Commercial Trucks | Ted Britt Truck
+    # Center" both touch tedbritttrucks.com, but only the second is the name.
+    core = re.sub(r'[^a-z0-9]', '', domain.split('.')[0].lower())
+    best, best_score = None, 0
+    for c in cands:
+        n = _clean_dealer_name(c)
+        low = n.lower()
+        if not (3 <= len(n) <= 60) or low in _GENERIC_NAMES or '.com' in low or 'www.' in low:
+            continue
+        if not _name_matches_domain(n, domain):
+            continue
+        score = sum(len(w) for w in re.findall(r'[a-z0-9]+', low) if len(w) >= 3 and w in core)
+        if score > best_score:          # strict: earlier (more authoritative) wins ties
+            best, best_score = n, score
+    return best
+
 def harvest_vin_from_html(text, soup=None):
     """
     Pull the vehicle's VIN out of a VDP's HTML. Used for dealer platforms whose
@@ -3063,6 +3372,17 @@ def check_universal_status(url, session):
         text_lower = text.lower()
         soup = BeautifulSoup(text, 'html.parser')
         page_title = soup.title.string.strip().lower() if soup.title else ""
+
+        # The dealership's own name, read once per domain from a page we already
+        # fetched — so reports show the name the dealer uses, not a URL slug.
+        try:
+            _dom = _dealer_domain(url)
+            if _dom and _dom not in HARVESTED_DEALER_NAMES:
+                _nm = harvest_dealer_name_from_html(text, soup, _dom)
+                if _nm:
+                    HARVESTED_DEALER_NAMES[_dom] = _nm
+        except Exception:
+            pass
 
         # This dealer's links don't carry a VIN: take it off the page itself so
         # the report can still show one. Done before the status checks so a
@@ -3337,7 +3657,7 @@ if run_analysis_clicked:
     unique_domains_list = [d for d in unique_domains_list if d]
     is_multi_dealer = len(unique_domains_list) > 1
     
-    df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: smart_dealer_name(x, is_multi_dealer)) 
+    df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: dealer_display_name(x, is_multi_dealer)) 
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
     st.info(f"Scanning {len(vdp_urls):,} vehicles for current availability...")
@@ -3552,6 +3872,17 @@ if run_analysis_clicked:
                 st.info("A few dealers couldn't be matched in the market inventory.")
 
 
+    # Names read off the dealers' own pages are only known after the scan.
+    try:
+        harvest_names_for_unnamed(df_raw['Page Url'].tolist(), session)
+    except Exception:
+        pass
+    try:
+        _name_map = resolve_dealer_names(df_raw['Page Url'].tolist(), is_multi_dealer)
+        df_raw['Dealer'] = df_raw['Page Url'].apply(
+            lambda u: _name_map.get(_dealer_domain(u)) or dealer_display_name(u, is_multi_dealer))
+    except Exception:
+        pass
     df_raw['Sold_Status'] = df_raw['Page Url'].map(vdp_results).fillna('N/A')
     df = df_raw.copy()
     
@@ -3635,87 +3966,91 @@ if run_analysis_clicked:
 
 # --- SIDEBAR: SESSION HISTORY MANAGER ---
 # Sidebar tools that must be available BEFORE any report is run.
-with st.sidebar.expander("📊 Market Lookup Status", expanded=False):
-    st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
-    st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
-    st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
-    st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
-    if isinstance(st.session_state.get('mc_month_usage'), int):
-        cap_note = f" of `{MC_MONTH_CAP}` cap" if MC_MONTH_CAP else ""
-        st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}`{cap_note} (from report log)")
-    st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
-               "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
+if is_admin():
+  with st.sidebar.expander("📊 Market Lookup Status", expanded=False):
+      st.markdown(f"**Lookup key:** {'✅ detected' if get_marketcheck_key() else '❌ not set'}")
+      st.markdown(f"**Per-report budget:** `{MC_BUDGET}` lookups")
+      st.markdown(f"**Inventory page cap:** `{MC_PAGE_CAP}` rows")
+      st.markdown(f"**Cars per lookup:** `{MC_PAGE_SIZE}`")
+      if isinstance(st.session_state.get('mc_month_usage'), int):
+          cap_note = f" of `{MC_MONTH_CAP}` cap" if MC_MONTH_CAP else ""
+          st.markdown(f"**Lookups this month:** `{st.session_state.mc_month_usage}`{cap_note} (from report log)")
+      st.caption("Adjustable in settings via MARKETCHECK_BUDGET, "
+                 "MARKETCHECK_PAGE_CAP, and MARKETCHECK_PAGE_SIZE.")
 
-with st.sidebar.expander("🧪 Market Lookup Diagnostic", expanded=False):
-    st.caption("Fires 5 tiny probes (5 lookups) to show which filters this API "
-               "key honors, plus a 1-call inventory test. Use a real dealer "
-               "domain and a VIN currently on their site.")
-    diag_domain = st.text_input("Dealer domain", value="hamby.com", key="mc_diag_dom")
-    diag_vin = st.text_input("A live VIN from that dealer", value="", key="mc_diag_vin")
-    if st.button("Run diagnostic", key="mc_diag_btn"):
-        dkey = get_marketcheck_key()
-        if not dkey:
-            st.error("No MarketCheck key configured.")
-        else:
-            import requests as _rq
-            probes = [("source= (rows=1)", {"source": diag_domain.strip()}),
-                      ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
-                                                          "rows": "50"}),
-                      ("vins=", {"vins": diag_vin.strip().upper()}),
-                      ("vin=", {"vin": diag_vin.strip().upper()}),
-                      # 1-call inventory test: zero listings, every VIN as a facet
-                      ("facets=vin (1-call inventory)", {"source": diag_domain.strip(),
-                                                         "rows": "0",
-                                                         "facets": "vin|0|1000"})]
-            # Second probe replicates the report's store call exactly:
-            # same params AND the same session construction.
-            _diag_sess = _rq.Session()
-            try:
-                _retry = Retry(total=3, backoff_factor=1,
-                               status_forcelist=[429, 500, 502, 503, 504])
-                _ad = HTTPAdapter(max_retries=_retry)
-                _diag_sess.mount('https://', _ad)
-            except Exception:
-                pass
-            for label, extra in probes:
-                if "vin" in label and not diag_vin.strip():
-                    st.markdown(f"**{label}** — skipped (no VIN entered)")
-                    continue
-                try:
-                    _getter = _diag_sess.get if "report-style" in label else _rq.get
-                    # Facets exist only on the search endpoint; test it there no
-                    # matter which endpoint the report is configured to use.
-                    _target = _MC_DEFAULT_ENDPOINT if "facets" in label else MC_ENDPOINT
-                    pr = _getter(_target, params={"api_key": dkey, "rows": "1",
-                                                  "start": "0", **extra}, timeout=20)
-                    if pr.status_code == 200:
-                        body = pr.json()
-                        nf = body.get("num_found", "?")
-                        if "facets" in label:
-                            fac = (body.get("facets") or {}).get("vin") or []
-                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`, "
-                                        f"VINs returned as facets = `{len(fac)}`")
-                            if fac and nf not in ("?", None) and len(fac) >= min(int(nf), 1000) * 0.9:
-                                st.caption("✅ Facets returned (nearly) the whole store in one "
-                                           "call — a 1-call inventory pull is viable for this "
-                                           "dealer.")
-                            elif fac:
-                                st.caption("Facets returned a partial list — MarketCheck caps "
-                                           "the facet length below this store's size.")
-                            else:
-                                st.caption("No VIN facets returned — this key/endpoint doesn't "
-                                           "support facets=vin.")
-                        else:
-                            st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
-                    else:
-                        st.markdown(f"**{label}** — HTTP {pr.status_code}: "
-                                    f"`{str(pr.text)[:120]}`")
-                except Exception as e:
-                    st.markdown(f"**{label}** — {type(e).__name__}: {str(e)[:120]}")
-                time.sleep(0.25)
-            st.caption("How to read this: a filter is honored when num_found is "
-                       "small (dealer-sized for source=, ~1-5 for vin=). A number "
-                       "in the millions means that filter is being ignored.")
+if is_admin():
+  with st.sidebar.expander("🧪 Market Lookup Diagnostic", expanded=False):
+      st.caption("Fires 5 tiny probes (5 lookups) to show which filters this API "
+                 "key honors, plus a 1-call inventory test. Use a real dealer "
+                 "domain and a VIN currently on their site.")
+      diag_domain = st.text_input("Dealer domain", value="hamby.com", key="mc_diag_dom")
+      diag_vin = st.text_input("A live VIN from that dealer", value="", key="mc_diag_vin")
+      if st.button("Run diagnostic", key="mc_diag_btn"):
+          dkey = get_marketcheck_key()
+          if not dkey:
+              st.error("No MarketCheck key configured.")
+          else:
+              import requests as _rq
+              probes = [("source= (rows=1)", {"source": diag_domain.strip()}),
+                        ("source= (rows=50, report-style)", {"source": diag_domain.strip(),
+                                                            "rows": "50"}),
+                        ("vins= (+source)", {"vins": diag_vin.strip().upper(),
+                                             "source": diag_domain.strip()}),
+                        ("vin= (+source)", {"vin": diag_vin.strip().upper(),
+                                            "source": diag_domain.strip()}),
+                        # 1-call inventory test: zero listings, every VIN as a facet
+                        ("facets=vin (1-call inventory)", {"source": diag_domain.strip(),
+                                                           "rows": "0",
+                                                           "facets": "vin|0|1000"})]
+              # Second probe replicates the report's store call exactly:
+              # same params AND the same session construction.
+              _diag_sess = _rq.Session()
+              try:
+                  _retry = Retry(total=3, backoff_factor=1,
+                                 status_forcelist=[429, 500, 502, 503, 504])
+                  _ad = HTTPAdapter(max_retries=_retry)
+                  _diag_sess.mount('https://', _ad)
+              except Exception:
+                  pass
+              for label, extra in probes:
+                  if "vin" in label and not diag_vin.strip():
+                      st.markdown(f"**{label}** — skipped (no VIN entered)")
+                      continue
+                  try:
+                      _getter = _diag_sess.get if "report-style" in label else _rq.get
+                      # Facets exist only on the search endpoint; test it there no
+                      # matter which endpoint the report is configured to use.
+                      _target = _MC_DEFAULT_ENDPOINT if "facets" in label else MC_ENDPOINT
+                      pr = _getter(_target, params={"api_key": dkey, "rows": "1",
+                                                    "start": "0", **extra}, timeout=20)
+                      if pr.status_code == 200:
+                          body = pr.json()
+                          nf = body.get("num_found", "?")
+                          if "facets" in label:
+                              fac = (body.get("facets") or {}).get("vin") or []
+                              st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`, "
+                                          f"VINs returned as facets = `{len(fac)}`")
+                              if fac and nf not in ("?", None) and len(fac) >= min(int(nf), 1000) * 0.9:
+                                  st.caption("✅ Facets returned (nearly) the whole store in one "
+                                             "call — a 1-call inventory pull is viable for this "
+                                             "dealer.")
+                              elif fac:
+                                  st.caption("Facets returned a partial list — MarketCheck caps "
+                                             "the facet length below this store's size.")
+                              else:
+                                  st.caption("No VIN facets returned — this key/endpoint doesn't "
+                                             "support facets=vin.")
+                          else:
+                              st.markdown(f"**{label}** — HTTP 200, num_found = `{nf}`")
+                      else:
+                          st.markdown(f"**{label}** — HTTP {pr.status_code}: "
+                                      f"`{str(pr.text)[:120]}`")
+                  except Exception as e:
+                      st.markdown(f"**{label}** — {type(e).__name__}: {str(e)[:120]}")
+                  time.sleep(0.25)
+              st.caption("How to read this: a filter is honored when num_found is "
+                         "small (dealer-sized for source=, ~1-5 for vin=). A number "
+                         "in the millions means that filter is being ignored.")
 
 
 if st.session_state.history:
@@ -3754,6 +4089,19 @@ def dismissible_notice(notice_key, body, icon="🗓️"):
             if st.button("✕", key=f"_dismiss_btn_{notice_key}", help="Dismiss this note"):
                 st.session_state[flag] = True
                 st.rerun()
+
+# --- SIDEBAR: ADMIN UNLOCK (kept small; reps never need this) ---
+if not is_admin():
+    with st.sidebar.expander("🔧 Admin", expanded=False):
+        if get_admin_key():
+            _adm = st.text_input("Admin key", type="password", key="_admin_key_input")
+            if _adm and _adm == get_admin_key():
+                st.session_state["_is_admin"] = True
+                st.rerun()
+            elif _adm:
+                st.caption("That key didn't match.")
+        else:
+            st.caption("Set ADMIN_KEY in settings to enable the admin tools.")
 
 if st.session_state.current_report_id is not None:
     st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
@@ -3945,9 +4293,9 @@ if st.session_state.current_report_id is not None:
     if _pre_ctx.get('header_meta'):
         st.caption(_pre_ctx['header_meta'])
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Units Sold (Attributed)", m_units)
-    m2.metric("Est. Revenue Sold", f"${m_rev:,.0f}")
-    m3.metric("Total Pipeline Value", f"${m_pipe:,.0f}")
+    m1.metric("Shopped Vehicles Sold", m_units, help="Vehicles our audience shopped that have since left the lot - influence and velocity, not purchases by our visitors.")
+    m2.metric("Est. Value of Shopped Vehicles Sold", f"${m_rev:,.0f}")
+    m3.metric("Total Shopped Value", f"${m_pipe:,.0f}", help="Estimated value of every vehicle our audience shopped - sold, still listed, and unconfirmed. Sizes the in-market demand the campaign reached.")
     m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
 
     # Optional reporting context (sidebar → "Report Details").
@@ -4010,12 +4358,16 @@ if st.session_state.current_report_id is not None:
                 fig_traffic = px.bar(dealer_group_export.head(10), x='Dealer', y='Total Visitors', title='Top Dealers by Traffic')
                 st.plotly_chart(fig_traffic, use_container_width=True)
             with cB:
-                fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Attributed Sales')
+                fig_sales = px.bar(dealer_group_export.sort_values('Units Sold', ascending=False).head(10), x='Dealer', y='Units Sold', title='Top Dealers by Shopped Vehicles Sold')
                 st.plotly_chart(fig_sales, use_container_width=True)
                 
             display_group = dealer_group_export.copy()
             display_group['Est. Rev Sold'] = display_group['Est. Rev Sold'].apply(lambda x: f"${x:,.0f}")
             display_group['Pipeline Value'] = display_group['Pipeline Value'].apply(lambda x: f"${x:,.0f}")
+            display_group = display_group.rename(columns={
+                'Units Sold': 'Shopped Vehicles Sold',
+                'Est. Rev Sold': 'Est. Value Sold',
+                'Pipeline Value': 'Total Shopped Value'})
             
             st.dataframe(display_group, column_config={
                 "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%")
@@ -4197,16 +4549,17 @@ if st.session_state.current_report_id is not None:
 
     # Tucked away on purpose: this file is for the attribution report builder,
     # not part of a rep's normal workflow.
-    with st.expander("🧩 Data export (for attribution reporting)", expanded=False):
-        if facts_bytes:
-            st.caption("Structured version of this report's figures, for combining with "
-                       "website attribution and Polk data.")
-            st.download_button("Download facts (.json)", data=facts_bytes,
-                               file_name=facts_name, mime="application/json")
-        else:
-            st.caption("Select the **report month** under 🗓️ Report Details in the "
-                       "sidebar to enable this export — the reporting period is needed "
-                       "to line this analysis up against website and Polk data.")
+    if is_admin():
+      with st.expander("🧩 Data export (for attribution reporting)", expanded=False):
+          if facts_bytes:
+              st.caption("Structured version of this report's figures, for combining with "
+                         "website attribution and Polk data.")
+              st.download_button("Download facts (.json)", data=facts_bytes,
+                                 file_name=facts_name, mime="application/json")
+          else:
+              st.caption("Select the **report month** under 🗓️ Report Details in the "
+                         "sidebar to enable this export — the reporting period is needed "
+                         "to line this analysis up against website and Polk data.")
 
     st.divider()
     
@@ -4215,18 +4568,20 @@ if st.session_state.current_report_id is not None:
         ### **Definitions & Insights**
         *(These match the Glossary & Methodology section in your PDF and PowerPoint exports.)*
 
-        **1. Units Sold (Attributed)**
-        Vehicles removed from the dealer's live inventory *after* receiving attributed campaign traffic. This confirms the audience we drove to the site actively shopped for cars that moved off the lot.
+        **1. Shopped Vehicles Sold**
+        Vehicles our campaign audience shopped that have since left the dealer's live inventory. This shows the campaign sending **qualified shoppers into the pipeline** and the pace that inventory is moving — it indicates **influence and sales velocity, not purchases made by our visitors.** The more campaign visits a vehicle received, the more likely we influenced its sale.
 
-        **2. Est. Revenue Sold & Total Pipeline Value**
+        **2. Est. Value of Shopped Vehicles Sold, Total Shopped Value & Value Still on the Lot**
         Directional, data-driven value estimates — not exact transaction prices.
         * **New cars:** Base MSRP for the specific model.
         * **Used cars:** Base MSRP depreciated by age — **15% for year one, 10% for each following year.**
-        * *Excludes trim levels, options, and dealer markups. Use it to gauge "pipeline power," not to quote deal values.*
+        * **Total Shopped Value** is the estimated value of *every* vehicle our audience shopped — sold, still listed, and unconfirmed. It sizes the in-market demand the campaign reached.
+        * **Est. Value Still on the Lot** is the part of that total that hasn't sold — shopped vehicles still listed for sale (unconfirmed vehicles left out).
+        * *Excludes trim levels, options, and dealer markups — don't quote these as deal values.*
 
         **3. Look-to-Book Ratio**
-        The conversion velocity of the inventory we advertised, split New vs. Used.
-        * *Formula:* `Sold VDPs ÷ Total Active VDPs`
+        How quickly the inventory our audience engaged with is moving, split New vs. Used.
+        * *Formula:* `Shopped vehicles sold ÷ all shopped vehicles`
         * *Tip: the Interactive VDP Filter turns this into a velocity story — concentrated traffic converts at visibly higher rates.*
 
         **4. Traffic Mix**
