@@ -609,16 +609,24 @@ def build_group_chart_images(dealer_group, top_n=10):
             continue
     return images
 
-def high_influence_count(sold_df):
-    """Sold vehicles with at least INFLUENCE_THRESHOLD_VISITS attributed visits."""
+def ltb_split_line(metrics):
+    """
+    The New vs Used sell-through comparison, stated plainly. Returns None when
+    either side has no viewed vehicles (a 0% there would mean "none on the
+    lot", not "none sold"). Gap is in percentage POINTS, never "% faster".
+    """
     try:
-        v = pd.to_numeric(sold_df['Attributed Unique Visitors'], errors='coerce')
-        return int((v >= INFLUENCE_THRESHOLD_VISITS).sum())
+        if not metrics.get('new_viewed') or not metrics.get('used_viewed'):
+            return None
+        n = float(metrics['new_ltb']); u = float(metrics['used_ltb'])
     except Exception:
         return None
-
-def high_influence_label():
-    return f"High-influence sales ({INFLUENCE_THRESHOLD_VISITS}+ campaign visits)"
+    gap = abs(u - n)
+    head = f"Sell-through: Used {u:.1f}%  \u00b7  New {n:.1f}%"
+    if gap < 1.0:
+        return head + "  -  new and used are moving at about the same pace"
+    faster = "used" if u > n else "new"
+    return head + f"  -  {faster} inventory is moving {gap:.1f} points faster"
 
 def build_kpi_band_image(metrics):
     """
@@ -641,9 +649,6 @@ def build_kpi_band_image(metrics):
                      color='white', fontsize=8.5, fontweight='bold')
             fig.text(x, 0.36, val, ha='center', va='center',
                      color='white', fontsize=21, fontweight='bold')
-        fig.text(3.5 / 4.0, 0.10,
-                 f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
-                 ha='center', va='center', color='#DDE3F8', fontsize=8)
         import matplotlib.lines as mlines
         for i in (1, 2, 3):
             fig.add_artist(mlines.Line2D([i / 4.0, i / 4.0], [0.18, 0.84],
@@ -686,11 +691,6 @@ CLIENT_GLOSSARY = [
      "The estimated value of the viewed vehicles still listed for sale - the part of "
      "Est. Total Value Viewed that hasn't sold yet. Vehicles whose status couldn't be "
      "confirmed are left out."),
-    ("High-Influence Sales",
-     f"Viewed vehicles that sold after receiving {INFLUENCE_THRESHOLD_VISITS} or more campaign "
-     f"visits. A vehicle typically draws about {INFLUENCE_BENCHMARK_VISITS} qualified page visits "
-     f"before it sells, so at {INFLUENCE_THRESHOLD_VISITS}+ our campaign supplied at least half "
-     f"of that typical demand - the sales we most likely influenced."),
     ("Look-to-Book Ratio",
      "Viewed vehicles sold / all viewed vehicles, split New vs Used - how quickly "
      "the inventory our audience engaged with is moving."),
@@ -866,6 +866,27 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed):
                 row['raw_name'] = ent['raw']
             rows_s.append(row)
         block['shopped_by_make_model'] = rows_s or None
+
+    # ---- v2: look-to-book by attributed-visit band (JSON only, no display) ----
+    # Tests over time whether more campaign visits go with faster selling. Same
+    # definition as the headline LTB: sold / all viewed vehicles in the band.
+    # Empty bands are omitted, never reported as 0.
+    if shopped:
+        _vis = pd.to_numeric(scope_vdp['Attributed Unique Visitors'], errors='coerce')
+        _is_sold = scope_vdp['Is Sold'].astype(bool)
+        _bands = []
+        for _label, _lo, _hi in (("1", 1, 1), ("2-4", 2, 4), ("5-9", 5, 9), ("10+", 10, None)):
+            _m = (_vis >= _lo) & ((_vis <= _hi) if _hi is not None else True)
+            _n = int(_m.sum())
+            if not _n:
+                continue
+            _s = int((_m & _is_sold).sum())
+            _row = {'band': _label, 'min_visits': _lo, 'viewed': _n, 'sold': _s,
+                    'look_to_book_pct': round(_s / _n * 100, 1)}
+            if _hi is not None:
+                _row['max_visits'] = _hi
+            _bands.append(_row)
+        block['look_to_book_by_visit_band'] = _bands or None
 
     # ---- v2: influence evidence on the sold units ----
     if sold_n:
@@ -1213,21 +1234,16 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                  align=PP_ALIGN.CENTER)
         add_text(s1, cx, y0 + Inches(0.8), card_w, Inches(0.9), val, 30, WHITE,
                  bold=True, align=PP_ALIGN.CENTER)
-    if metrics.get('new_ltb') is not None or metrics.get('used_ltb') is not None:
-        add_text(s1, x0 + 3 * (card_w + gap), y0 + card_h + Inches(0.08),
-                 card_w, Inches(0.4),
-                 f"New: {metrics.get('new_ltb', '-')}%  |  Used: {metrics.get('used_ltb', '-')}%",
-                 11, GREY, align=PP_ALIGN.CENTER)
-    _hi = metrics.get('high_influence')
-    if _hi is not None and units_val:
-        add_text(s1, Inches(0.5), Inches(5.1), Inches(12.3), Inches(0.36),
-                 f"{high_influence_label()}: {_hi:,} of {int(units_val):,} viewed vehicles sold",
-                 14, NAVY, bold=True, align=PP_ALIGN.CENTER)
+    _split = ltb_split_line(metrics)
+    if _split:
+        # Leads the slide: used vs new sell-through and the gap, plainly.
+        add_text(s1, Inches(0.5), Inches(4.85), Inches(12.3), Inches(0.42),
+                 _split, 16, NAVY, bold=True, align=PP_ALIGN.CENTER)
     if ctx.get('threshold_line'):
         # Sits directly under the KPI cards: it qualifies those numbers.
-        add_text(s1, Inches(0.5), Inches(5.48), Inches(12.3), Inches(0.32),
+        add_text(s1, Inches(0.5), Inches(5.4), Inches(12.3), Inches(0.32),
                  ctx['threshold_line'], 12, NAVY, align=PP_ALIGN.CENTER)
-    add_text(s1, Inches(0.5), Inches(5.9), Inches(12.3), Inches(0.5),
+    add_text(s1, Inches(0.5), Inches(5.85), Inches(12.3), Inches(0.5),
              "Look-to-Book = viewed vehicles sold / all viewed vehicles - how "
              "quickly the inventory our audience engaged with is moving.", 12, GREY, italic=True,
              align=PP_ALIGN.CENTER)
@@ -1492,13 +1508,11 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
             except Exception: pass
             band_done = True
             pdf.ln(2)
-            _hi = metrics.get('high_influence')
-            if _hi is not None and metrics.get('units_sold'):
-                pdf.set_font("Arial", "B", 10)
+            _split = ltb_split_line(metrics)
+            if _split:
+                pdf.set_font("Arial", "B", 11)
                 pdf.set_text_color(10, 31, 92)
-                pdf.cell(0, 6, safe_str(f"{high_influence_label()}: {_hi:,} of "
-                                        f"{int(metrics['units_sold']):,} viewed vehicles sold"),
-                         ln=True, align="C")
+                pdf.cell(0, 7, safe_str(_split.replace("\u00b7", "|")), ln=True, align="C")
             if _ctx.get('threshold_line'):
                 pdf.set_font("Arial", "", 9)
                 pdf.set_text_color(10, 31, 92)
@@ -4300,9 +4314,9 @@ if st.session_state.current_report_id is not None:
     with st.expander("🎯 Interactive VDP Filter", expanded=False):
         st.markdown(
             "<div style='font-size: 14px; color: #555; margin-bottom: 15px;'>"
-            "<i>💡 <b>Share of Demand:</b> A vehicle typically needs ~30 total VDP views to sell. "
-            "Adjust the slider to set the minimum visitors required to claim marketing influence. "
-            "Driving just 5–15 highly qualified visitors represents a dominant share of the demand needed to move a unit.</i></div>", 
+            "<i>💡 <b>VDP Filter:</b> Sets the minimum campaign visitors a vehicle needs to be "
+            "included in this report. Raise it to focus on the inventory our audience showed the "
+            "most interest in; leave it at 1 to see every vehicle they viewed.</i></div>", 
             unsafe_allow_html=True
         )
         st.slider("Minimum Visitors to Claim a Sale", min_value=1, max_value=30, step=1, label_visibility="collapsed", key="min_visitors")
@@ -4348,18 +4362,13 @@ if st.session_state.current_report_id is not None:
     m1.metric("Viewed Vehicles Sold", m_units, help="Vehicles our campaign audience viewed that have since left the lot - influence and velocity, not purchases by our visitors.")
     m2.metric("Est. Value Sold", f"${m_rev:,.0f}")
     m3.metric("Est. Total Value Viewed", f"${m_pipe:,.0f}", help="Estimated value of every vehicle our audience viewed - sold, still listed, and unconfirmed. Sizes the in-market demand the campaign reached.")
-    m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%", delta=f"New: {new_ltb:.1f}% | Used: {used_ltb:.1f}%", delta_color="off")
+    m4.metric(label="Look-to-Book Ratio", value=f"{m_ltb:.1f}%")
+    _split = ltb_split_line({'new_ltb': new_ltb, 'used_ltb': used_ltb,
+                             'new_viewed': len(new_vdp_all), 'used_viewed': len(used_vdp_all)})
+    if _split:
+        st.markdown(f"<div style='text-align:center; font-size:18px; font-weight:700; "
+                    f"color:#0A1F5C; margin:6px 0 2px;'>{_split}</div>", unsafe_allow_html=True)
 
-    _hi_n = high_influence_count(sold_df)
-    if _hi_n is not None and m_units:
-        hi1, _hi2, _hi3, _hi4 = st.columns(4)
-        hi1.metric(high_influence_label(), f"{_hi_n:,}",
-                   delta=f"{_hi_n / m_units * 100:.0f}% of viewed vehicles sold",
-                   delta_color="off",
-                   help=f"Sold vehicles that received {INFLUENCE_THRESHOLD_VISITS}+ campaign visits. "
-                        f"A vehicle typically draws ~{INFLUENCE_BENCHMARK_VISITS} qualified visits "
-                        f"before it sells, so our campaign supplied at least half its typical "
-                        f"demand — the sales we most likely influenced.")
     # Optional reporting context (sidebar → "Report Details").
     report_ctx = _pre_ctx
     if report_ctx.get('threshold_line'):
@@ -4573,7 +4582,7 @@ if st.session_state.current_report_id is not None:
     if dealer_group_export is not None and not dealer_group_export.empty:
         chart_images.update(build_group_chart_images(dealer_group_export))
     metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors, 'context': report_ctx,
-                      'high_influence': high_influence_count(sold_df)}
+                      'new_viewed': len(new_vdp_all), 'used_viewed': len(used_vdp_all)}
     export_missed_df = missed_df if not sold_df.empty else pd.DataFrame()
 
     ex1, ex2, ex3, ex4 = st.columns(4)
@@ -4638,7 +4647,7 @@ if st.session_state.current_report_id is not None:
         *(These match the Glossary & Methodology section in your PDF and PowerPoint exports.)*
 
         **1. Viewed Vehicles Sold**
-        Vehicles our campaign audience viewed on the dealer's site that have since left its live inventory. This shows the campaign sending **qualified shoppers into the pipeline** and the pace that inventory is moving — it indicates **influence and sales velocity, not purchases made by our visitors.** The more campaign visits a vehicle received, the more likely we influenced its sale.
+        Vehicles our campaign audience viewed on the dealer's site that have since left its live inventory. This shows the campaign sending **qualified shoppers into the pipeline** and the pace that inventory is moving — it indicates **influence and sales velocity, not purchases made by our visitors.**
 
         **2. Est. Value Sold, Est. Total Value Viewed & Value Still on the Lot**
         Directional, data-driven value estimates — not exact transaction prices.
@@ -4647,9 +4656,6 @@ if st.session_state.current_report_id is not None:
         * **Est. Total Value Viewed** is the estimated value of *every* vehicle our audience viewed — sold, still listed, and unconfirmed. It sizes the in-market demand the campaign reached.
         * **Est. Value Still on the Lot** is the part of that total that hasn't sold — viewed vehicles still listed for sale (unconfirmed vehicles left out).
         * *Excludes trim levels, options, and dealer markups — don't quote these as deal values.*
-
-        **High-Influence Sales**
-        Viewed vehicles that sold after receiving **@@T@@ or more campaign visits**. A vehicle typically draws about **@@B@@ qualified page visits** before it sells, so at @@T@@+ our campaign supplied at least half of that typical demand — these are the sales we most likely influenced.
 
         **3. Look-to-Book Ratio**
         How quickly the inventory our audience engaged with is moving, split New vs. Used.
@@ -4669,7 +4675,7 @@ if st.session_state.current_report_id is not None:
         **7. How Inventory Is Checked (Methodology)**
         The tool scans the dealer's website in **real time** — results reflect inventory status at the moment the report runs, not a historical snapshot. If a dealer's site blocks scanning, the tool **automatically falls back to live national market inventory** (and remembers recent answers for about a week), so manual fixes are rarely needed.
         * *Trust but verify:* before presenting, click a few **Top Sold** links (they should 404 or redirect to the search page) and a few **Watch List** links (they should load a live vehicle page).
-        """.replace("@@T@@", str(INFLUENCE_THRESHOLD_VISITS)).replace("@@B@@", str(INFLUENCE_BENCHMARK_VISITS)))
+        """)
 
 else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
