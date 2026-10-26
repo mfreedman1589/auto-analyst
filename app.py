@@ -732,10 +732,8 @@ def he_comparison_reason(he):
         return (f"too few vehicles on one side of {t} visits to compare fairly "
                 f"(needs {HE_MIN_GROUP_VIEWED}+ viewed on each side).")
     if all_g['lift_pts'] < HE_MIN_LIFT_PTS:
-        return (f"high-engagement vehicles aren't selling meaningfully faster in this report "
-                f"({all_g['lift_pts']:+.1f} pts). That's common: a car that sits longer keeps "
-                f"collecting visits, and showroom cars draw browsers, so look-to-book often dips "
-                f"as the threshold rises. The strip shows avg. visits per sale instead.")
+        return (f"high-engagement vehicles aren't selling faster here ({all_g['lift_pts']:+.1f} pts) - "
+                f"common, since cars that sit longer keep collecting visits.")
     bad = [g['label'].replace(' only', '').lower() for g in he['groups'] if g['lift_pts'] <= 0]
     return (f"the gap comes from the new/used mix, not engagement - among "
             f"{' and '.join(bad)} the high-engagement vehicles didn't sell faster.")
@@ -4872,7 +4870,7 @@ if st.session_state.current_report_id is not None:
     )
     st.caption("Vehicles our campaign audience viewed on the dealer's site.")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Viewed Vehicles Sold", m_units, help="Vehicles our campaign audience viewed that have since left the lot - influence and velocity, not purchases by our visitors.")
+    m1.metric("Viewed Vehicles Sold", f"{m_units:,}", help="Vehicles our campaign audience viewed that have since left the lot - influence and velocity, not purchases by our visitors.")
     m2.metric("Est. Value Sold", f"${m_rev:,.0f}")
     m3.metric("Est. Total Value Viewed", f"${m_pipe:,.0f}", help="Estimated value of every vehicle our audience viewed - sold, still listed, and unconfirmed. Sizes the in-market demand the campaign reached.")
     _chip = ltb_chip_text({'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}",
@@ -4932,36 +4930,55 @@ if st.session_state.current_report_id is not None:
         with st.container(border=True):
             st.markdown(f"**⭐ High-Engagement Sales** &nbsp;<span style='color:#6B7280;'>"
                         f"viewed vehicles with {T}+ campaign visits</span>", unsafe_allow_html=True)
-            hl, hr = st.columns([1.15, 1], gap="large")
-            with hl:
-                k1, k2 = st.columns(2)
-                k1.metric("High-Engagement Sold", f"{he['sold']:,}",
-                          delta=(f"{he['sold_share_pct']:.0f}% of the {he['total_sold']:,} sold"
-                                 if he['sold_share_pct'] is not None else None),
+            _sold_delta = (f"{he['sold_share_pct']:.0f}% of the {he['total_sold']:,} sold"
+                           if he['sold_share_pct'] is not None else None)
+            if he['comparison_ok']:
+                # The comparison holds: lead with it.
+                hl, hr = st.columns([1.15, 1], gap="large")
+                with hl:
+                    k1, k2 = st.columns(2)
+                    k1.metric("High-Engagement Sold", f"{he['sold']:,}", delta=_sold_delta,
+                              delta_color="off")
+                    k2.metric("Est. Value Sold", f"${he['value_sold']:,.0f}")
+                    k3, k4 = st.columns(2)
+                    k3.metric("Look-to-Book", f"{he['ltb']:.1f}%",
+                              delta=f"{he['lift_pts']:+.1f} pts vs 1-{T - 1} visits",
+                              delta_color="normal")
+                    k4.metric("Vehicles Viewed", f"{he['viewed']:,}",
+                              delta=f"of {he['total_viewed']:,} viewed", delta_color="off")
+                with hr:
+                    _ltb_fig = he_ltb_plotly(he)
+                    if _ltb_fig is not None:
+                        st.markdown("**Look-to-Book by Campaign Engagement**")
+                        st.plotly_chart(_ltb_fig, use_container_width=True, config={'displayModeBar': False})
+            else:
+                # No supportable lift: one row lined up under the headline cards,
+                # with avg. visits per sale in the look-to-book slot (as in the
+                # exports). The comparison is one discreet toggle away.
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("High-Engagement Sold", f"{he['sold']:,}", delta=_sold_delta,
                           delta_color="off")
                 k2.metric("Est. Value Sold", f"${he['value_sold']:,.0f}")
-                k3, k4 = st.columns(2)
-                k3.metric("Look-to-Book", f"{he['ltb']:.1f}%" if he['ltb'] is not None else "-",
-                          delta=(f"{he['lift_pts']:+.1f} pts vs 1-{T - 1} visits"
-                                 if he['lift_pts'] is not None else None),
-                          delta_color="normal" if he['comparison_ok'] else "off")
-                k4.metric("Vehicles Viewed", f"{he['viewed']:,}",
+                k3.metric("Vehicles Viewed", f"{he['viewed']:,}",
                           delta=f"of {he['total_viewed']:,} viewed", delta_color="off")
-            with hr:
-                _ltb_fig = he_ltb_plotly(he)
-                if _ltb_fig is not None:
-                    st.markdown("**Look-to-Book by Campaign Engagement**")
-                    st.plotly_chart(_ltb_fig, use_container_width=True, config={'displayModeBar': False})
-                else:
-                    st.caption(f"Not enough vehicles on both sides of {T} visits to compare "
-                               f"look-to-book fairly (needs {HE_MIN_GROUP_VIEWED}+ each).")
+                k4.metric("Avg. Visits per Sale",
+                          f"{he['avg_visits_sold']:.0f}" if he.get('avg_visits_sold') is not None else "-",
+                          help="Average unique campaign visits on each high-engagement sale.")
+                if st.toggle("Show look-to-book comparison", value=False, key="he_show_ltb"):
+                    _ltb_fig = he_ltb_plotly(he)
+                    if _ltb_fig is not None:
+                        st.plotly_chart(_ltb_fig, use_container_width=True, config={'displayModeBar': False})
+                    else:
+                        st.caption(f"Not enough vehicles on both sides of {T} visits to compare "
+                                   f"look-to-book fairly (needs {HE_MIN_GROUP_VIEWED}+ each).")
             # Tell the rep what the client will (and won't) see.
             if not he['export_ok']:
                 st.caption(f"ℹ️ Fewer than {HE_MIN_SOLD_FOR_EXPORT} high-engagement sales - the "
                            f"exports leave this section out. Try a lower threshold.")
             elif not he['comparison_ok']:
                 _why = he_comparison_reason(he)
-                st.caption(f"ℹ️ Exports include these sales but not the look-to-book comparison: {_why}")
+                st.caption(f"ℹ️ Showing avg. visits per sale instead of look-to-book (here and in the "
+                           f"exports): {_why}")
             else:
                 st.caption("✅ Included in the PDF and PowerPoint: a summary strip on page 1 and a "
                            "High-Engagement Sales section.")
