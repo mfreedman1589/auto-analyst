@@ -9,7 +9,7 @@ import re
 import concurrent.futures
 import plotly.express as px
 import plotly.graph_objects as go
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 import datetime
 import pytz
@@ -415,17 +415,124 @@ TRIM_TOKENS = {
     'avenir', 'st', 'st-line', 'titanium', 'calligraphy', 'ultimate,',
 }
 
+# Dealer listing text that rides along in VDP URLs - not part of the model.
+LISTING_TOKENS = {
+    'clean', 'one', 'owner', 'carfax', 'certified', 'cpo', 'well', 'maintained',
+    'pkg', 'package', 'heated', 'cooled', 'remote', 'start', 'camera', 'nav',
+    'navigation', 'moonroof', 'sunroof', 'pano', 'panoramic', 'leather', 'blis',
+    'sync', 'power', 'liftgate', 'bluecruise', 'co', 'pilot360', 'wireless',
+    'carplay', 'hud', 'driver', 'assist', 'lkas', 'fordpass', 'exterior', 'upgrade',
+    'recaro', 'seats', 'speakers', 'tech', 'technology', 'confidence', 'captains',
+    'bench', 'row', '2nd', '3rd', 'passenger', 'dual', 'motor', 'long', 'range',
+    'base', 'cargo', 'van', 'wb', 'medium', 'roof', 'ultra', 'dark', 'theme',
+    'perform', 'performance', 'prestige', 'quattro', 'xdrive', 'sdrive', '4matic',
+    'premiere', 'black', 'label', 'diamond', 'sasquatch', 'active', 'stx', 'lobo',
+    'luxe', 'le', 'speed', 'dsg', 'hp', 'loaded', 'warranty', 'special', 'ii',
+    'iii', 'hg', 'w', 'with', 'and', 'only', 'miles', 'low_miles',
+    'xlstx', 'hse', 'autobiography', 'dynamic', 'awd4', 'hybrid4',
+    'outer', 'banks', 'gt', 'ecoboost', 'stingray', '1lt', '2lt', '3lt', '1lz', '2lz',
+    '3lz', 'wt', 'xg', 'luxury', 'rf', 'grand', 'hatchback', 'sportback', 'standard',
+    'sterling', 'val', 'pure', 'blind', 'spot', 'warning', 'recharge', 'electr',
+    'electric', 'momentum', 'advanced', 'advance', 'spec', 'plug', 'exposed', 'carbon',
+    'fiber', 'glass', 'trim', 'level', 'guide', 't6', 't5', 't8', '2dr', '4dr', 'cpe',
+    'research', 'researchl', '2rs', '1rs',
+    'serving', 'owings', 'mills', 'i', 'force', 'scat', 'pack', 'rt', 'full', 'time',
+    'engage', '4orce', 'free', 'wheeling', 'bend', 'laredo', 'at4x', 'dump', 'body',
+    'box', 'srw', 'drw', 'chassis', 'service', 'levan', 'by', 'iconic', 'signature',
+    'john', 'works', 'all4', 'line', 'upfit', 'stake', 'bed', 'flatbed', 'utility_body',
+    'plaid',
+}
+LISTING_PATTERNS = (
+    re.compile(r'^\d{5,}$'),            # stock / ID numbers
+    re.compile(r'^\d+wt$'),             # 1WT / 2WT
+    re.compile(r'^\d{2}[tl]$'),         # 20T, 30L engines
+    re.compile(r'^v\d{1,2}$'),          # V6 / V8
+    re.compile(r'^b\d$'),               # Volvo B5/B6 powertrains
+    re.compile(r'.*pkg.*'),              # PKG360, LOBOPKG
+    re.compile(r'^[sx]drive\d*[a-z]?$'),  # BMW xDrive40i
+)
+# Model names that contain a word normally treated as a trim; keep them whole.
+MULTIWORD_MODELS = [
+    'LOW CAB FORWARD', 'GRAND WAGONEER', 'GRAND CHEROKEE', 'SANTA FE', 'SANTA CRUZ',
+    'RANGE ROVER SPORT', 'RANGE ROVER EVOQUE', 'RANGE ROVER VELAR', 'RANGE ROVER',
+    'TRANSIT CONNECT', 'E TRANSIT', 'MUSTANG MACH E', 'BRONCO SPORT', 'CROWN VICTORIA',
+    'EXPRESS CUTAWAY', 'GRAND CARAVAN', 'TOWN COUNTRY', 'GRAND HIGHLANDER',
+]
+
+def decode_vehicle_text(text):
+    """URL-decode a vehicle name ('F%2B150' -> 'F 150', 'SANTA%2BFE' -> 'SANTA FE')."""
+    t = unquote(str(text or ''))
+    # Some sites drop the '%' from encoded characters: "F20150" (= "F%20150")
+    # and "F2B150" (= "F%2B150") are an F-150.
+    t = re.sub(r'(?i)\b(F)(?:20|2B)([1-7]50)', r'\1 \2', t)
+    t = t.replace('+', ' ').replace('_', ' ')
+    return re.sub(r'\s+', ' ', t).strip()
+
+def _is_listing_token(tok):
+    t = tok.lower().strip('.,')
+    return t in LISTING_TOKENS or any(p.match(t) for p in LISTING_PATTERNS)
+
 def normalize_model(name):
-    """'2025 Chevrolet Silverado 1500 Rst Four Wheel...' -> 'Chevrolet Silverado 1500'."""
-    s = re.sub(r'^\d{4}\s+', '', str(name)).strip()
+    """'2025 Chevrolet Silverado 1500 Rst Four Wheel...' -> 'Chevrolet Silverado 1500'.
+    Also URL-decodes, and drops dealer listing text (stock numbers, 'Clean One
+    Owner', package/feature lists) so variants merge into the base model."""
+    s = re.sub(r'^\d{4}\s+', '', decode_vehicle_text(name)).strip()
+    s = re.sub(r'[^\w\s\-\.]', ' ', s)          # stray symbols left by decoding
+    s = re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r'(?i)\bR T\b', 'RT', s)                    # Charger R/T
+    s = re.sub(r'(?i)\bSuper Duty (?=[FE][ -]?\d)', '', s)  # "Super Duty F 350" -> "F 350"
     tokens = s.split()
+    # "F 250 F 250" / "4Runner ... 4Runner": drop a repeated model token run
+    dedup = []
+    for t in tokens:
+        if dedup and t.lower() == dedup[-1].lower():
+            continue
+        dedup.append(t)
+    tokens = dedup
+    # Protect multi-word model names ("Low Cab Forward") from trim truncation.
+    up = ' '.join(tokens).upper().replace('-', ' ')
+    make_len = 1
+    for mw in MULTIWORD_MAKES:                     # "Land Rover", "Mercedes Benz"
+        if up == mw or up.startswith(mw + ' '):
+            make_len = len(mw.split())
+            break
+    protect = make_len
+    up_rest = ' '.join(tokens[make_len:]).upper()
+    for mm in MULTIWORD_MODELS:
+        if up_rest == mm or up_rest.startswith(mm + ' '):
+            protect = make_len + len(mm.split())
+            break
+    # Letter-code model names that collide with trim words: Lexus LX/LS/ES,
+    # Mercedes "S Class", Acura/Infiniti/Genesis codes.
+    if len(tokens) > make_len:
+        first = tokens[make_len]
+        nxt = tokens[make_len + 1].lower() if len(tokens) > make_len + 1 else ''
+        code_make = up.split(' ')[0] in ('LEXUS', 'ACURA', 'INFINITI', 'GENESIS', 'CADILLAC', 'LINCOLN')
+        if nxt == 'class':
+            protect = max(protect, make_len + 2)
+        elif code_make and re.match(r'^[A-Za-z]{2,3}$', first):
+            protect = max(protect, make_len + 1)
     keep = []
     for i, t in enumerate(tokens):
-        if i >= 1 and t.lower().strip('.,') in TRIM_TOKENS:
+        if i >= max(make_len, protect) and (t.lower().strip('.,') in TRIM_TOKENS or _is_listing_token(t)):
+            break
+        if i >= make_len + 1 and re.match(r'^\d{5,}$', t):
             break
         keep.append(t)
-    if len(keep) < 2 and len(tokens) >= 2:
-        keep = tokens[:2]
+    # Model codes that collide with trim words ("Lexus LX 570"): keep the code
+    # when a number follows it. A bare trim with nothing after ("Lincoln
+    # Reserve") is not a model and is left out.
+    if len(keep) == make_len and len(tokens) > make_len + 1 \
+            and re.match(r'^\d{2,4}[a-zA-Z]{0,2}$', tokens[make_len + 1]) \
+            and not _is_listing_token(tokens[make_len]):
+        keep = tokens[:make_len + 2]
+    while len(keep) > 2 and keep[-1].upper() == 'A':
+        keep = keep[:-1]                           # "MDX A" (from "A-Spec")
+    if len(keep) > 2 and keep[-1].lower() == 'series' and not keep[-2].isdigit():
+        keep = keep[:-1]                           # "Grand Wagoneer Series II"
+    # BMW "3 Series 330i" -> "3 Series"
+    if len(keep) >= 4 and keep[2].lower() == 'series' and keep[1].isdigit():  # BMW
+        keep = keep[:3]
     return ' '.join(keep) if keep else s
 
 
@@ -732,11 +839,11 @@ def he_comparison_reason(he):
         return (f"too few vehicles on one side of {t} visits to compare fairly "
                 f"(needs {HE_MIN_GROUP_VIEWED}+ viewed on each side).")
     if all_g['lift_pts'] < HE_MIN_LIFT_PTS:
-        return (f"high-engagement vehicles aren't selling faster here ({all_g['lift_pts']:+.1f} pts) - "
+        return (f"high-engagement vehicles didn't sell at a higher rate here ({all_g['lift_pts']:+.1f} pts) - "
                 f"common, since cars that sit longer keep collecting visits.")
     bad = [g['label'].replace(' only', '').lower() for g in he['groups'] if g['lift_pts'] <= 0]
     return (f"the gap comes from the new/used mix, not engagement - among "
-            f"{' and '.join(bad)} the high-engagement vehicles didn't sell faster.")
+            f"{' and '.join(bad)} the high-engagement vehicles didn't sell at a higher rate.")
 
 def he_ltb_plotly(he):
     """Dashboard version of the look-to-book comparison (rep-facing, so it is
@@ -1067,6 +1174,14 @@ def canonical_model(model_text):
     if not s:
         return None
     s = re.sub(r'\b([A-Z]{1,2}) (\d{2,4}[A-Z]{0,2})\b', r'\1-\2', s)
+    s = re.sub(r'\b([A-Z]{2}) (\d)\b', r'\1-\2', s)            # CX 5 -> CX-5
+    s = re.sub(r'\b(CR|HR|BR|GR) ([A-Z])\b', r'\1-\2', s)        # CR V -> CR-V
+    s = re.sub(r'\b(F-\d{3})SD\b', r'\1', s)          # F-250SD -> F-250 (all Super Duty)
+    s = re.sub(r'\b(\d{4})HD\b', r'\1 HD', s)          # SILVERADO 2500HD -> 2500 HD
+    s = re.sub(r'\b(\S+)(?: \1\b)+', r'\1', s)            # "F-250 F-250" -> "F-250"
+    s = re.sub(r'\bF-(\d{3}) SD\b', r'F-\1', s)
+    if not re.search(r'[A-Z0-9]', s.replace('-', '')):
+        return None                                    # e.g. "MAZDA %2B" -> no model
     return s
 
 def split_make_model(vehicle_name):
@@ -1091,6 +1206,20 @@ def split_make_model(vehicle_name):
         up = parts[1] if len(parts) > 1 else ""
     make = MAKE_ALIASES.get(make, make)
     return (make or None, canonical_model(up), raw or None)
+
+def display_model_name(vehicle_name):
+    """Make + model for the aggregated model tables (dashboard, deck, PDF),
+    from the same merge as the facts JSON: 'Ford F-250', 'Mercedes-Benz GLC 300',
+    'Honda CR-V'. None when no real model decodes (row is left out)."""
+    mk, md, _raw = split_make_model(vehicle_name)
+    if not mk or not md:
+        return None
+    def _fmt(tok):
+        if any(c.isdigit() for c in tok) or '-' in tok or len(tok) <= 3:
+            return tok.upper()
+        return tok.title()
+    make = mk.title() if len(mk) > 3 else mk.upper()
+    return f"{make} {' '.join(_fmt(t) for t in md.split())}"
 
 def _num(v):
     """Plain JSON number, or None. Never returns 0 for missing input."""
@@ -1181,6 +1310,9 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed, he_threshold=Non
         block['look_to_book_gap_pts'] = round(_u - _n, 1)
         block['faster_condition'] = ('USED' if _u - _n >= 1.0 else
                                      'NEW' if _n - _u >= 1.0 else 'EVEN')
+        # Same value, clearer name: look-to-book is a sell-through share, not a
+        # time measure. faster_condition is kept for older readers.
+        block['higher_sell_through_condition'] = block['faster_condition']
     block['est_revenue_sold'] = _num(scope_sold['Est. Value'].sum()) if sold_n else None
     block['est_pipeline_value'] = _num(scope_vdp['Est. Value'].sum()) if shopped else None
     # v2: the part of the shopped value still listed for sale. Unconfirmed
@@ -1332,6 +1464,25 @@ def _facts_block(scope_df, scope_vdp, scope_sold, scope_missed, he_threshold=Non
 
     return {k: v for k, v in block.items() if v is not None}
 
+def _site_data_status(site_rows):
+    """data_status for one site:
+      'ok'            - vehicle pages were viewed and checked
+      'no_vehicle_data' - campaign traffic reached the site, but only non-vehicle
+                        pages (homepage, service, staff...), so there is no
+                        inventory to report; traffic_mix/visits_total still apply
+      'no_data'       - no campaign traffic rows at all"""
+    if site_rows is None or site_rows.empty:
+        return {'data_status': 'no_data',
+                'data_note': 'No campaign traffic to this site in the uploaded report.'}
+    n_vdp = int(site_rows['Category'].astype(str).str.contains('VDP', na=False).sum())
+    if n_vdp == 0:
+        visits = int(pd.to_numeric(site_rows['Attributed Unique Visitors'], errors='coerce').fillna(0).sum())
+        cats = ', '.join(sorted(set(site_rows['Category'].astype(str).str.lower())))
+        return {'data_status': 'no_vehicle_data',
+                'data_note': f"{visits} campaign visits, all to non-vehicle pages ({cats}); "
+                             f"no vehicle detail pages were viewed, so there is no inventory to report."}
+    return {'data_status': 'ok'}
+
 def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
                      dealer_group=None, report_ctx=None):
     """
@@ -1381,6 +1532,7 @@ def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
                     seen[mk] = seen.get(mk, 0) + 1
             brands = [m for m, _c in sorted(seen.items(), key=lambda kv: -kv[1])]
         site = {'site_id': _slug(dealer), 'dealer_name': str(dealer)}
+        site.update(_site_data_status(d_rows))
         if domain:
             site['domain'] = domain
             site['url'] = f"https://www.{domain}/"
@@ -1441,8 +1593,10 @@ def build_facts_json(df, vdp_df, sold_df, missed_df, metrics, report_id,
             s_missed = (missed_df[missed_df['Dealer'] == dealer]
                         if missed_df is not None and not missed_df.empty else None)
             blk = _facts_block(s_df, s_vdp, s_sold, s_missed, he_threshold=_het)
-            if blk:
-                by_site[_slug(dealer)] = blk
+            # Every site gets an entry: a site with no vehicle pages is marked,
+            # never left as a near-empty block the reader has to interpret.
+            blk.update(_site_data_status(s_df))
+            by_site[_slug(dealer)] = blk
         if by_site:
             facts['by_site'] = by_site
 
@@ -1568,7 +1722,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         if frame is None or frame.empty:
             return pd.DataFrame()
         f = frame.copy()
-        f['Model_Only'] = f['Vehicle Name'].apply(normalize_model)
+        f['Model_Only'] = f['Vehicle Name'].apply(display_model_name)
         counts = f['Model_Only'].value_counts().reset_index()
         counts.columns = ['Make/Model', count_label]
         return counts[counts[count_label] > 1].head(top_n)
@@ -2022,7 +2176,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     def model_table(frame, count_label, header, top_n=10):
         f = frame.copy()
-        f['Model_Only'] = f['Vehicle Name'].apply(normalize_model)
+        f['Model_Only'] = f['Vehicle Name'].apply(display_model_name)
         counts = f['Model_Only'].value_counts().reset_index()
         counts.columns = ['Make/Model', 'Count']
         counts = counts[counts['Count'] > 1].head(top_n)
@@ -2475,7 +2629,7 @@ def smart_dealer_name(url, is_multi=False):
         u = 'http://' + u
     netloc = urlparse(u).netloc
     netloc = re.sub(r'^(www\.|shop\.|inventory\.|cars\.)', '', netloc)
-    s = netloc.split('.')[0]
+    s = netloc.split('.')[0].replace('-', ' ')
     
     brands = ['honda', 'toyota', 'ford', 'chevrolet', 'chevy', 'nissan', 'jeep', 'chrysler', 'dodge', 'ram',
               'hyundai', 'kia', 'vw', 'volkswagen', 'bmw', 'mercedes', 'audi', 'lexus', 'acura',
@@ -2618,6 +2772,7 @@ def clean_name_universal(url):
     
     parsed = urlparse(str(url))
     path_str = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    path_str = unquote(path_str)          # "F%2B150" -> "F+150"
     
     brands = ['Jeep', 'Ford', 'Gmc', 'Toyota', 'Dodge', 'Ram', 'Chrysler', 'Chevrolet', 'Honda', 'Nissan', 'Hyundai', 'Kia', 'Bmw', 'Lexus', 'Volvo', 'Volkswagen', 'Subaru', 'Mazda', 'Mercedes', 'Audi', 'Cadillac', 'Buick', 'Acura', 'Infiniti', 'Lincoln', 'Land Rover', 'Jaguar', 'Porsche', 'Mini']
     make = ""
@@ -2639,13 +2794,64 @@ def clean_name_universal(url):
     
     return f"{year} {make} {' '.join(clean_tokens)}".title().strip()
 
+# Ad servers / click trackers that occasionally appear in the export. Their rows
+# are not dealer pages and must not count as an extra "dealer" (which would turn
+# a single-store report into a group report).
+AD_TRACKER_DOMAINS = (
+    'simpli.fi', 'doubleclick.net', 'googleadservices.com', 'googlesyndication.com',
+    'adsrvr.org', 'facebook.com', 'fb.com', 'google.com', 'bing.com', 'linktr.ee',
+)
+
+def is_ad_tracker_url(url):
+    dom = urlparse(str(url)).netloc.lower()
+    return any(dom == d or dom.endswith('.' + d) for d in AD_TRACKER_DOMAINS)
+
+RESEARCH_PAGE_PATTERNS = (
+    '/blog', '/blogs/', '/news/', '/article', '/research/', '-vs-', '-versus-',
+    'comparison', 'trim-level', 'trim-guide', 'buyers-guide', 'buying-guide',
+    '-review', '/reviews/', 'model-research', 'showroom/', '/research', '-research',
+)
+
+def is_research_page(url):
+    """Blog posts, comparisons and model guides carry a year in the URL but are
+    not vehicles - they must never be scanned as VDPs (a deleted post would read
+    as a 'sale')."""
+    u = str(url).lower()
+    return any(p in u for p in RESEARCH_PAGE_PATTERNS)
+
+def normalize_report_frame(df):
+    """Applied whenever a stored report is displayed or exported, so reports
+    run before a fix get it too: research/blog pages are never vehicles, and
+    vehicle names are URL-decoded ('F%2B150' -> 'F 150')."""
+    if df is None or df.empty or 'Page Url' not in df.columns:
+        return df
+    df = df.copy()
+    research = df['Page Url'].map(is_research_page) | \
+        df['Page Url'].astype(str).str.lower().str.contains('offerdetail', regex=False)
+    if 'Category' in df.columns and research.any():
+        df.loc[research & df['Category'].astype(str).str.contains('VDP', na=False), 'Category'] = 'Other'
+        if 'Is Sold' in df.columns:
+            df.loc[research, 'Is Sold'] = False
+    if 'Vehicle Name' in df.columns:
+        df['Vehicle Name'] = df['Vehicle Name'].map(
+            lambda n: decode_vehicle_text(n).title() if isinstance(n, str) and '%' in n else n)
+    return df
+
 def categorize(u):
     u = str(u).lower()
+    if is_research_page(u):
+        return 'Other'
     
     if any(x in u for x in ['thank', 'confirm', 'success']):
         return 'Online Conversions'
         
     if u.endswith('.com/') or u.endswith('.com'): return 'Homepage'
+    if any(x in u for x in ['incentive', 'offers', 'offerdetail', 'specials', 'promotions', 'rebate']):
+        return 'Incentives/Offers'
+    # A URL carrying a real VIN is a vehicle page, even when the vehicle itself
+    # mentions a service body ("F-350 XL DRW Service Body").
+    if get_year(u) and extract_vin(u) != 'N/A':
+        return 'VDP'
     if any(x in u for x in ['service', 'parts', 'collision', 'appointment', 'maintenance']): return 'Service'
     
     if any(x in u for x in ['incentive', 'offers', 'specials', 'promotions', 'rebate']): 
@@ -4153,6 +4359,10 @@ if run_analysis_clicked:
     
     df_raw = df_raw.dropna(subset=['Page Url'])
     df_raw = df_raw[df_raw['Page Url'].astype(str).str.strip() != '']
+    _ads = df_raw['Page Url'].map(is_ad_tracker_url)
+    if _ads.any():
+        st.caption(f"ℹ️ Left out {int(_ads.sum())} ad-tracking row(s) - not dealer pages.")
+        df_raw = df_raw[~_ads]
     
     df_raw['Category'] = df_raw['Page Url'].apply(categorize)
     
@@ -4639,7 +4849,7 @@ if st.session_state.current_report_id is not None:
     if _hdr_ctx.get('header_meta'):
         st.caption(_hdr_ctx['header_meta'])
     
-    df = st.session_state.history[st.session_state.current_report_id].copy()
+    df = normalize_report_frame(st.session_state.history[st.session_state.current_report_id])
 
     # --- LOOKBACK ADVISORY (screen only, dismissible) ---
     # A long gap between the campaign month and the scan naturally pushes most
@@ -5127,7 +5337,7 @@ if st.session_state.current_report_id is not None:
                     with c_left:
                         if not d_sold.empty:
                             d_sold_models = d_sold.copy()
-                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(normalize_model)
+                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(display_model_name)
                             d_m_counts = d_sold_models['Model_Only'].value_counts().reset_index()
                             d_m_counts.columns = ['Make/Model', 'Units Sold']
                             st.markdown("**🏆 Top Sold Models**")
@@ -5135,7 +5345,7 @@ if st.session_state.current_report_id is not None:
                     with c_right:
                         if not d_missed.empty:
                             d_missed_models = d_missed.copy()
-                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(normalize_model)
+                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(display_model_name)
                             d_m_counts = d_missed_models['Model_Only'].value_counts().reset_index()
                             d_m_counts.columns = ['Make/Model', 'Missed Count']
                             st.markdown("**⚠️ Top Missed Models**")
@@ -5156,7 +5366,7 @@ if st.session_state.current_report_id is not None:
     with t1:
         if not sold_df.empty:
             sold_models = sold_df.copy()
-            sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(normalize_model)
+            sold_models['Model_Only'] = sold_models['Vehicle Name'].apply(display_model_name)
             model_counts = sold_models['Model_Only'].value_counts().reset_index()
             model_counts.columns = ['Make/Model', 'Units Sold']
             top_models = model_counts[model_counts['Units Sold'] > 1].head(10)
@@ -5169,7 +5379,7 @@ if st.session_state.current_report_id is not None:
     with t2:
         if not missed_df.empty:
             missed_models = missed_df.copy()
-            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(normalize_model)
+            missed_models['Model_Only'] = missed_models['Vehicle Name'].apply(display_model_name)
             missed_counts = missed_models['Model_Only'].value_counts().reset_index()
             missed_counts.columns = ['Make/Model', 'Missed Count']
             top_missed = missed_counts[missed_counts['Missed Count'] > 1].head(10)
@@ -5316,7 +5526,7 @@ if st.session_state.current_report_id is not None:
         **3. Look-to-Book Ratio**
         How quickly the inventory our audience engaged with is moving, split New vs. Used.
         * *Formula:* `Viewed vehicles sold ÷ all viewed vehicles`
-        * *Tip: the High-Engagement Filter shows whether the vehicles our audience came back to most are selling faster. When they are, the comparison appears on screen and in the exports; when they aren't, it stays out.*
+        * *Tip: the High-Engagement Filter shows whether the vehicles our audience came back to most sold at a higher rate. When they did, the comparison appears on screen and in the exports; when they aren't, it stays out.*
 
         **3b. High-Engagement Sales**
         Viewed vehicles sold that drew the threshold number of campaign visits or more (5+ by default) — the sales where our audience's engagement was deepest. In the default **Highlight** mode it's a conservative subset shown *alongside* the full report; **Filter** mode limits the whole report to those vehicles instead.
