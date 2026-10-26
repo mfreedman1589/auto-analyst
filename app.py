@@ -5212,15 +5212,18 @@ else:
     st.info("👈 Upload a CSV in the sidebar to begin analysis.")
     st.markdown("---")
     st.markdown("### 🆕 What's New")
-    st.markdown("Big update — here's what you can do now:")
-    st.markdown("**⭐ NEW: High-Engagement Sales — the big number plus the conservative one.** The VDP filter is now the **High-Engagement Filter**, right at the top of every report. By default it no longer cuts down your report: you keep the full picture (every vehicle our audience viewed, what sold, the mix and value tiers), and the vehicles our audience came back to most — **5+ campaign visits** by default — are called out alongside it, on screen and in the PDF and PowerPoint. Slide the threshold and watch the numbers update live. Want the whole report filtered instead (for your most discerning dealers)? Choose **Filter report**. Don't need it? Turn it **Off**. *Heads-up: if you used to raise the filter, your headline numbers will now be bigger — that's the full report; the filtered figures are in the High-Engagement strip.*")
-    st.markdown("**📄 PDF and PowerPoint now match.** The PDF uses the same section titles and order as the deck.")
-    st.markdown("**🗓️ Report Details are easier to find.** Campaign month and unique visitors now sit right above the Run button, and you can add or edit them on the report itself. They add the lookback window and pages per visitor to your downloads.")
-    st.markdown("**🏢 Auto Group deep dives are easier to find.** Store deep dives open right under the group scoreboard, and adding a page per store to the PDF/deck is one toggle under Export Reports.")
-    st.markdown("**📊 Download a client-ready PowerPoint.** One click builds a Premion-styled deck that drops straight into your attribution presentation: headline results, traffic and sales charts, Top Sold, the Missed Opportunities watch list, and a glossary slide. No rebuilding slides by hand.")
-    st.markdown("**📄 A much better PDF.** Your results now lead with a bold summary banner, cleaner charts, and a built-in Glossary & Methodology page — send it to a client as-is.")
-    st.markdown("**🔓 Blocked dealer sites just work now.** If a dealer's website blocks our scanner, the tool checks live market inventory on its own to find what sold. No more hunting for API URLs, and the 'Dealer Inspire Fix' should rarely be needed. It also remembers recent dealer lookups, so re-running a report is faster.")
-    st.markdown("**🏢 Auto Groups get the full treatment.** Multi-store reports now include group performance charts, a store-by-store scoreboard, and an optional deep-dive page for every rooftop — in the dashboard, the PDF, and the deck.")
-    st.markdown("**🗓️ Tell a stronger story with 'Report Details' (in the sidebar).** Add the report month and your total unique visitors, and your report will automatically show the **lookback window** (how long the inventory had to move) plus **average pages per visitor** — great proof of how engaged our audience is.")
-    st.markdown("**🚙 Cleaner model reporting.** Top Sold and Missed models now group across trims — six Silverado 1500s show as one line with a count of 6, instead of six separate rows. Full trim names still appear in the detail lists.")
-    st.markdown("_Questions or something look off? Send them my way._")
+    st.markdown(
+        "- **⭐ High-Engagement Sales.** Keep the full report and call out the vehicles our "
+        "audience came back to most (5+ visits by default) right alongside it. Or choose "
+        "**Filter report** for your most discerning dealers, or turn it **Off**. *If you used "
+        "to raise the VDP filter, your headline numbers will look bigger - that's the full picture.*\n"
+        "- **📊 Client-ready PowerPoint and PDF.** Premion-styled, built to sit alongside your "
+        "website attribution deck, with matching sections and a glossary. Group reports add a "
+        "store scoreboard and an optional page per store.\n"
+        "- **🔓 Blocked dealer sites just work.** If a site blocks our scanner, the tool checks "
+        "live market inventory on its own. No manual fixes needed.\n"
+        "- **🗓️ Report Details.** Add the campaign month and unique visitors (above the Build "
+        "button, or on the report) to show the lookback window and pages per visitor.\n"
+        "- **🏷️ Clearer labels.** \"Viewed Vehicles Sold\" and dealer names pulled from their "
+        "own websites. Models now group across trims.")
+    st.caption("Questions or something look off? Send them my way.")
