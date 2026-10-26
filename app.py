@@ -429,6 +429,20 @@ def normalize_model(name):
     return ' '.join(keep) if keep else s
 
 
+def report_month_options(n_months=18):
+    """None (not specified) followed by the last n_months, newest first."""
+    today = datetime.date.today()
+    opts, y, m = [None], today.year, today.month
+    for _ in range(n_months):
+        opts.append((y, m))
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+    return opts
+
+def format_report_month(v):
+    return "— Not specified —" if v is None else datetime.date(v[0], v[1], 1).strftime("%B %Y")
+
 def build_report_context(min_visitors=1, report_month=None, unique_visitors=0,
                          total_visits=0, scan_dt=None):
     """
@@ -3853,38 +3867,31 @@ st.title("🚗 Auto-Sales Intelligence Agent")
 st.sidebar.markdown("### 📥 New Analysis")
 uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
 
-run_analysis_clicked = False
-if uploaded_file is not None:
-    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
-    st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
-
-# --- OPTIONAL REPORT DETAILS (lookback window + visitor engagement) ---
-with st.sidebar.expander("🗓️ Report Details (optional)", expanded=False):
-    st.caption("Adds the lookback window and visitor engagement stats to your dashboard "
-               "and downloads. Can be filled in before or after running the report.")
-    _today = datetime.date.today()
-    _month_opts = [None]
-    _y, _m = _today.year, _today.month
-    for _ in range(18):
-        _month_opts.append((_y, _m))
-        _m -= 1
-        if _m == 0:
-            _m = 12
-            _y -= 1
+# --- REPORT DETAILS (lookback window + visitor engagement) ---
+# Sits between the upload and the Run button so it's part of the normal flow,
+# not a hidden drawer. Still optional; can also be filled in on the report.
+with st.sidebar.container(border=True):
+    st.markdown("**🗓️ Report Details**")
+    st.caption("Recommended. Adds the lookback window and pages per visitor to the "
+               "dashboard and downloads.")
     st.selectbox(
-        "Report month (campaign traffic period)",
-        options=_month_opts,
-        format_func=lambda v: ("— Not specified —" if v is None
-                               else datetime.date(v[0], v[1], 1).strftime("%B %Y")),
+        "Campaign month",
+        options=report_month_options(),
+        format_func=format_report_month,
         key="report_month_sel",
         help="The month the uploaded traffic data covers. Used to calculate how long "
              "the inventory had to move before this scan."
     )
     st.number_input(
-        "Total unique visitors (optional)",
+        "Total unique visitors",
         min_value=0, step=1, key="unique_visitors_input",
         help="From the Unified Dashboard. Enables the average pages-per-visitor stat."
     )
+
+run_analysis_clicked = False
+if uploaded_file is not None:
+    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
+    st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
 # --- ADD A DEALER TO THE VAULT (salesperson-friendly) ---
 with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
@@ -4656,14 +4663,23 @@ if st.session_state.current_report_id is not None:
     #    Filter: the original behaviour — every figure limited to T+ vehicles.
     #    Moving either control reruns from the stored scan: no re-scanning.
     _vdp_every = df[df['Category'].str.contains('VDP', na=False)]
-    _MODE_LABELS = {'highlight': "✨ Highlight in full report", 'filter': "🔎 Filter entire report"}
+    _MODE_LABELS = {'highlight': "✨ Highlight", 'filter': "🔎 Filter report", 'off': "Off"}
+    _MODE_HELP = {
+        'highlight': "The full report stays the headline; these sales are called out alongside "
+                     "it - on screen and in the exports.",
+        'filter': "Every number, chart and export is limited to these vehicles - for your most "
+                  "discerning dealers.",
+        'off': "High-engagement stats are left out of the dashboard and the exports. The report "
+               "covers every viewed vehicle.",
+    }
+    _mode_now = st.session_state.get('vdp_mode') or 'highlight'
     st.markdown("<br>", unsafe_allow_html=True)
     with st.container(border=True):
         fc1, fc2 = st.columns([1.25, 1], gap="large")
         with fc1:
             st.markdown("##### 🎯 High-Engagement Filter")
             st.slider("Minimum campaign visits per vehicle", min_value=1, max_value=30, step=1,
-                      key="he_threshold",
+                      key="he_threshold", disabled=(_mode_now == 'off'),
                       help="Vehicles that drew at least this many unique visits from the campaign "
                            "audience. These are the vehicles our audience came back to most - the "
                            "sales where our influence is clearest.")
@@ -4671,32 +4687,29 @@ if st.session_state.current_report_id is not None:
             _seg_kwargs = dict(options=list(_MODE_LABELS), format_func=lambda k: _MODE_LABELS[k],
                                key="vdp_mode")
             try:
-                st.segmented_control("Apply it", required=True, **_seg_kwargs)
+                st.segmented_control("Show it in the report", required=True, **_seg_kwargs)
             except TypeError:                       # older Streamlit: no 'required'
-                st.segmented_control("Apply it", **_seg_kwargs)
-            if st.session_state.get('vdp_mode') == 'filter':
-                st.caption("Every number, chart and export is limited to these vehicles.")
-            else:
-                st.caption("The full report stays the headline; these sales are called out "
-                           "alongside it - on screen and in the exports.")
+                st.segmented_control("Show it in the report", **_seg_kwargs)
+            st.caption(_MODE_HELP.get(st.session_state.get('vdp_mode') or 'highlight', ''))
 
         he_threshold = int(st.session_state.he_threshold)
         vdp_mode = st.session_state.get('vdp_mode') or 'highlight'
-        # Live readout: how the subset reacts as the slider moves.
-        _v = pd.to_numeric(_vdp_every['Attributed Unique Visitors'], errors='coerce').fillna(0)
-        _s = _vdp_every['Is Sold'].astype(bool)
-        _hv, _hs = int((_v >= he_threshold).sum()), int(((_v >= he_threshold) & _s).sum())
-        _tv, _ts = len(_vdp_every), int(_s.sum())
-        if he_threshold <= 1:
-            _readout = ("At 1+ visits every viewed vehicle counts. Raise the threshold to "
-                        "spotlight the vehicles our audience came back to most.")
-        else:
-            _readout = (f"At <b>{he_threshold}+ visits</b>: <b>{_hv:,}</b> of {_tv:,} viewed vehicles"
-                        f" &nbsp;·&nbsp; <b>{_hs:,}</b> of {_ts:,} sold"
-                        + (f" &nbsp;·&nbsp; <b>{_hs / _hv * 100:.1f}%</b> look-to-book" if _hv else ""))
-        st.markdown(f"<div style='background:#EFF1FA;border-left:4px solid {PREMION_NAVY};"
-                    f"padding:8px 12px;border-radius:4px;font-size:14px;color:#1f2937;'>"
-                    f"{_readout}</div>", unsafe_allow_html=True)
+        if vdp_mode != 'off':
+            # Live readout: how the subset reacts as the slider moves.
+            _v = pd.to_numeric(_vdp_every['Attributed Unique Visitors'], errors='coerce').fillna(0)
+            _s = _vdp_every['Is Sold'].astype(bool)
+            _hv, _hs = int((_v >= he_threshold).sum()), int(((_v >= he_threshold) & _s).sum())
+            _tv, _ts = len(_vdp_every), int(_s.sum())
+            if he_threshold <= 1:
+                _readout = ("At 1+ visits every viewed vehicle counts. Raise the threshold to "
+                            "spotlight the vehicles our audience came back to most.")
+            else:
+                _readout = (f"At <b>{he_threshold}+ visits</b>: <b>{_hv:,}</b> of {_tv:,} viewed vehicles"
+                            f" &nbsp;·&nbsp; <b>{_hs:,}</b> of {_ts:,} sold"
+                            + (f" &nbsp;·&nbsp; <b>{_hs / _hv * 100:.1f}%</b> look-to-book" if _hv else ""))
+            st.markdown(f"<div style='background:#EFF1FA;border-left:4px solid {PREMION_NAVY};"
+                        f"padding:8px 12px;border-radius:4px;font-size:14px;color:#1f2937;'>"
+                        f"{_readout}</div>", unsafe_allow_html=True)
 
     min_visitors = he_threshold if vdp_mode == 'filter' else 1
     st.markdown("---")
@@ -4753,6 +4766,46 @@ if st.session_state.current_report_id is not None:
         st.caption(f"🔎 {report_ctx['threshold_line']} Switch the High-Engagement Filter to "
                    f"*Highlight* to see the full report with these sales called out.")
 
+    # Campaign context (Report Details). Sits right under the headline because
+    # it qualifies it (the lookback explains how long inventory had to move);
+    # the High-Engagement box below is a drill-down. When details are missing,
+    # a quiet prompt with an inline editor - never a blocking message.
+    def _sync_rm():
+        st.session_state['report_month_sel'] = st.session_state.get('rm_inline')
+    def _sync_uv():
+        st.session_state['unique_visitors_input'] = int(st.session_state.get('uv_inline') or 0)
+    st.session_state['rm_inline'] = st.session_state.get('report_month_sel')
+    st.session_state['uv_inline'] = int(st.session_state.get('unique_visitors_input') or 0)
+
+    _bits, _missing = [], []
+    if report_ctx.get('unique_visitors_fmt'):
+        _bits.append(f"<b>{report_ctx['unique_visitors_fmt']}</b> unique visitors")
+        if report_ctx.get('avg_pages'):
+            _bits.append(f"<b>{report_ctx['avg_pages']}</b> pages per visitor "
+                         f"<span style='color:#6B7280;'>({report_ctx.get('total_visits_fmt', '')} page visits)</span>")
+    else:
+        _missing.append("unique visitors (for pages per visitor)")
+    if report_ctx.get('lookback_short'):
+        _bits.append(f"<b>{report_ctx['lookback_short']}</b> "
+                     f"<span style='color:#6B7280;'>lookback</span>")
+    elif not st.session_state.get('report_month_sel'):
+        _missing.append("the campaign month (for the lookback window)")
+    _line = " &nbsp;·&nbsp; ".join(_bits)
+    if _missing:
+        _ask = ("Add " + " and ".join(_missing) + " - it carries into the PDF and deck.")
+        _line = (_line + " &nbsp;·&nbsp; " if _line else "") + f"<span style='color:#6B7280;'>{_ask}</span>"
+    cx1, cx2 = st.columns([5, 1.1], vertical_alignment="center")
+    with cx1:
+        st.markdown(f"<div style='font-size:14px;color:#1f2937;padding:6px 0;'>🗓️ &nbsp;{_line}</div>",
+                    unsafe_allow_html=True)
+    with cx2:
+        with st.popover("➕ Add details" if _missing else "✏️ Edit details", use_container_width=True):
+            st.selectbox("Campaign month", options=report_month_options(),
+                         format_func=format_report_month, key="rm_inline", on_change=_sync_rm)
+            st.number_input("Total unique visitors", min_value=0, step=1,
+                            key="uv_inline", on_change=_sync_uv,
+                            help="From the Unified Dashboard.")
+
     # Secondary view: the high-engagement subset of the headline numbers.
     if he is not None:
         T = he['threshold']
@@ -4793,27 +4846,24 @@ if st.session_state.current_report_id is not None:
                 st.caption("✅ Included in the PDF and PowerPoint: a summary strip on page 1 and a "
                            "High-Engagement Sales section.")
 
-    if report_ctx.get('unique_visitors_fmt'):
-        st.markdown("<br>", unsafe_allow_html=True)
-        e1, e2, e3, e4 = st.columns(4)
-        e1.metric("Unique Visitors", report_ctx['unique_visitors_fmt'],
-                  help="Total unique visitors driven by the campaign (entered in Report Details).")
-        if report_ctx.get('avg_pages'):
-            e2.metric("Avg. Pages per Visitor", report_ctx['avg_pages'],
-                      delta=f"{report_ctx.get('total_visits_fmt','')} total page visits",
-                      delta_color="off")
-        if report_ctx.get('lookback_short'):
-            e3.metric("Lookback Window", report_ctx['lookback_short'],
-                      help=report_ctx.get('lookback_help', ''))
-
     st.divider()
 
     domain_count = df['Dealer'].nunique()
     dealer_group_export = None
 
     if domain_count > 1:
-        st.markdown(f"### 🏢 Tier 2 / Auto Group Breakdown ({domain_count} Sites)")
-        show_tier2 = st.toggle("Display Individual Dealership Insights", value=True)
+        st.markdown(f"### 🏢 Auto Group Breakdown ({domain_count} Sites)")
+        with st.container(border=True):
+            g1, g2, g3 = st.columns([1, 1, 1.4], vertical_alignment="center")
+            with g1:
+                show_tier2 = st.toggle("📊 Store scoreboard", value=True,
+                                       help="Group charts and the store-by-store table.")
+            with g2:
+                show_deep_dives = st.toggle("🔍 Store deep dives", value=False,
+                                            help="A detail panel for every store, right below the scoreboard.")
+            with g3:
+                st.caption("Each store can also get its own page in the PDF and PowerPoint - "
+                           "turn on **Dealer Deep Dives** under Export Reports.")
 
         t2_visitors = df.groupby('Dealer')['Attributed Unique Visitors'].sum().reset_index(name='Total Visitors')
         t2_vdps = vdp_df.groupby('Dealer').agg(
@@ -4876,6 +4926,50 @@ if st.session_state.current_report_id is not None:
             st.dataframe(display_group, column_config={
                 "Look-to-Book (%)": st.column_config.NumberColumn(format="%.1f%%")
             }, use_container_width=True, hide_index=True)
+
+        if show_deep_dives:
+            st.markdown("#### 🔍 Store Deep Dives")
+            expand_all = st.toggle("Expand all stores", value=False)
+            for dealer_name in dealer_group_export['Dealer']:
+                _gr = dealer_group_export[dealer_group_export['Dealer'] == dealer_name].iloc[0]
+                _he_bit = (f" · {int(_gr['High-Engagement Sold'])} with {he_threshold}+ visits"
+                           if 'High-Engagement Sold' in dealer_group_export.columns else "")
+                with st.expander(f"🏢 {dealer_name} — {int(_gr['Units Sold'])} sold · "
+                                 f"{_gr['Look-to-Book (%)']}% look-to-book{_he_bit}", expanded=expand_all):
+                    d_sold = sold_df[sold_df['Dealer'] == dealer_name]
+                    missed_threshold_local = max(avg_v, min_visitors) if not sold_df.empty else min_visitors
+                    d_missed = df[(df['Dealer'] == dealer_name) & (df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold_local)]
+                    
+                    if d_sold.empty and d_missed.empty:
+                        st.info("No actionable sales or high-interest missed opportunities meet the current thresholds for this dealer.")
+                        continue
+                    
+                    c_left, c_right = st.columns(2)
+                    with c_left:
+                        if not d_sold.empty:
+                            d_sold_models = d_sold.copy()
+                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(normalize_model)
+                            d_m_counts = d_sold_models['Model_Only'].value_counts().reset_index()
+                            d_m_counts.columns = ['Make/Model', 'Units Sold']
+                            st.markdown("**🏆 Top Sold Models**")
+                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
+                    with c_right:
+                        if not d_missed.empty:
+                            d_missed_models = d_missed.copy()
+                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(normalize_model)
+                            d_m_counts = d_missed_models['Model_Only'].value_counts().reset_index()
+                            d_m_counts.columns = ['Make/Model', 'Missed Count']
+                            st.markdown("**⚠️ Top Missed Models**")
+                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
+                    
+                    if not d_sold.empty:
+                        st.markdown("**📄 Top Sold Units (Detail)**")
+                        st.dataframe(d_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
+                    
+                    if not d_missed.empty:
+                        st.markdown("**👀 Missed Opportunities (Detail)**")
+                        st.dataframe(d_missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
+
 
         st.divider()
 
@@ -4964,61 +5058,22 @@ if st.session_state.current_report_id is not None:
         display_missed.index += 1
         st.dataframe(display_missed, column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open"), "Attributed Unique Visitors": st.column_config.NumberColumn("Visitors")}, use_container_width=True)
 
-    # --- DEALER DEEP DIVES UI ---
-    if domain_count > 1 and dealer_group_export is not None:
-        st.divider()
-        st.markdown("### 🔍 Individual Dealership Deep Dives")
-        show_deep_dives = st.toggle("Display Dealership Deep Dives", value=False)
-        
-        if show_deep_dives:
-            expand_all = st.toggle("Expand All Profiles", value=False)
-            st.write("")
-            
-            for dealer_name in dealer_group_export['Dealer']:
-                with st.expander(f"🏢 {dealer_name} - Performance Details", expanded=expand_all):
-                    d_sold = sold_df[sold_df['Dealer'] == dealer_name]
-                    missed_threshold_local = max(avg_v, min_visitors) if not sold_df.empty else min_visitors
-                    d_missed = df[(df['Dealer'] == dealer_name) & (df['Sold_Status'] == 'Available') & (df['Category'].str.contains('VDP', na=False)) & (df['Attributed Unique Visitors'] >= missed_threshold_local)]
-                    
-                    if d_sold.empty and d_missed.empty:
-                        st.info("No actionable sales or high-interest missed opportunities meet the current thresholds for this dealer.")
-                        continue
-                    
-                    c_left, c_right = st.columns(2)
-                    with c_left:
-                        if not d_sold.empty:
-                            d_sold_models = d_sold.copy()
-                            d_sold_models['Model_Only'] = d_sold_models['Vehicle Name'].apply(normalize_model)
-                            d_m_counts = d_sold_models['Model_Only'].value_counts().reset_index()
-                            d_m_counts.columns = ['Make/Model', 'Units Sold']
-                            st.markdown("**🏆 Top Sold Models**")
-                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
-                    with c_right:
-                        if not d_missed.empty:
-                            d_missed_models = d_missed.copy()
-                            d_missed_models['Model_Only'] = d_missed_models['Vehicle Name'].apply(normalize_model)
-                            d_m_counts = d_missed_models['Model_Only'].value_counts().reset_index()
-                            d_m_counts.columns = ['Make/Model', 'Missed Count']
-                            st.markdown("**⚠️ Top Missed Models**")
-                            st.dataframe(d_m_counts.head(5), use_container_width=True, hide_index=True)
-                    
-                    if not d_sold.empty:
-                        st.markdown("**📄 Top Sold Units (Detail)**")
-                        st.dataframe(d_sold[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
-                    
-                    if not d_missed.empty:
-                        st.markdown("**👀 Missed Opportunities (Detail)**")
-                        st.dataframe(d_missed[['Vehicle Name', 'Type', 'VIN', 'Attributed Unique Visitors', 'Page Url']].sort_values('Attributed Unique Visitors', ascending=False).head(10), column_config={"Page Url": st.column_config.LinkColumn("Link", display_text="Open")}, use_container_width=True, hide_index=True)
-
     st.divider()
     st.markdown("### 📥 Export Reports")
-    
-    include_missed_in_pdf = st.checkbox("Include 'Missed Opportunities' in Exports (PDF & PowerPoint)", value=True)
     include_dealer_details = False
-    if domain_count > 1:
-        include_dealer_details = st.checkbox("Include 'Dealer Deep Dives' in Exports (PDF & PowerPoint)", value=False)
-        
-    st.write("") 
+    with st.container(border=True):
+        st.markdown("**Include in the PDF & PowerPoint**")
+        xo1, xo2 = st.columns(2)
+        with xo1:
+            include_missed_in_pdf = st.toggle("👀 Missed Opportunities (Watch List)", value=True)
+        with xo2:
+            if domain_count > 1 and dealer_group_export is not None:
+                _n_dd = int(len(dealer_group_export))
+                include_dealer_details = st.toggle(
+                    f"🏢 Dealer Deep Dives (+{_n_dd} store pages)", value=False,
+                    help="Adds a page per store: top sold and missed models, top sold units "
+                         "and the watch list for that rooftop.")
+    st.write("")
 
     metrics_bundle = {'units_sold': m_units, 'rev_sold': m_rev, 'pipeline': m_pipe, 'ltb': f"{m_ltb:.1f}", 'new_ltb': f"{new_ltb:.1f}", 'used_ltb': f"{used_ltb:.1f}", 'min_visitors': min_visitors, 'context': report_ctx,
                       'vdp_mode': vdp_mode, 'he_threshold': he_threshold, 'high_engagement': he,
@@ -5149,8 +5204,10 @@ else:
     st.markdown("---")
     st.markdown("### 🆕 What's New")
     st.markdown("Big update — here's what you can do now:")
-    st.markdown("**⭐ NEW: High-Engagement Sales — the big number plus the conservative one.** The VDP filter is now the **High-Engagement Filter**, right at the top of every report. By default it no longer cuts down your report: you keep the full picture (every vehicle our audience viewed, what sold, the mix and value tiers), and the vehicles our audience came back to most — **5+ campaign visits** by default — are called out alongside it, on screen and in the PDF and PowerPoint. Slide the threshold and watch the numbers update live. Prefer the old way? Switch it to **Filter entire report**. *Heads-up: if you used to raise the filter, your headline numbers will now be bigger — that's the full report; the filtered figures are in the High-Engagement strip.*")
+    st.markdown("**⭐ NEW: High-Engagement Sales — the big number plus the conservative one.** The VDP filter is now the **High-Engagement Filter**, right at the top of every report. By default it no longer cuts down your report: you keep the full picture (every vehicle our audience viewed, what sold, the mix and value tiers), and the vehicles our audience came back to most — **5+ campaign visits** by default — are called out alongside it, on screen and in the PDF and PowerPoint. Slide the threshold and watch the numbers update live. Want the whole report filtered instead (for your most discerning dealers)? Choose **Filter report**. Don't need it? Turn it **Off**. *Heads-up: if you used to raise the filter, your headline numbers will now be bigger — that's the full report; the filtered figures are in the High-Engagement strip.*")
     st.markdown("**📄 PDF and PowerPoint now match.** The PDF uses the same section titles and order as the deck.")
+    st.markdown("**🗓️ Report Details are easier to find.** Campaign month and unique visitors now sit right above the Run button, and you can add or edit them on the report itself. They add the lookback window and pages per visitor to your downloads.")
+    st.markdown("**🏢 Auto Group deep dives are easier to find.** Store deep dives open right under the group scoreboard, and adding a page per store to the PDF/deck is one toggle under Export Reports.")
     st.markdown("**📊 Download a client-ready PowerPoint.** One click builds a Premion-styled deck that drops straight into your attribution presentation: headline results, traffic and sales charts, Top Sold, the Missed Opportunities watch list, and a glossary slide. No rebuilding slides by hand.")
     st.markdown("**📄 A much better PDF.** Your results now lead with a bold summary banner, cleaner charts, and a built-in Glossary & Methodology page — send it to a client as-is.")
     st.markdown("**🔓 Blocked dealer sites just work now.** If a dealer's website blocks our scanner, the tool checks live market inventory on its own to find what sold. No more hunting for API URLs, and the 'Dealer Inspire Fix' should rarely be needed. It also remembers recent dealer lookups, so re-running a report is faster.")
