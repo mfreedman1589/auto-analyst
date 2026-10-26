@@ -429,6 +429,14 @@ def normalize_model(name):
     return ' '.join(keep) if keep else s
 
 
+def clean_report_title(report_id):
+    """Report name without the run time: 'Ted Britt Auto Group (03:04 PM ET)' ->
+    'Ted Britt Auto Group'. The time stays in Session History and file names,
+    where reps use it to tell runs apart; clients see the clean name."""
+    t = re.sub(r'\s*\(\d{1,2}:\d{2}\s*[AP]M[^)]*\)', '', str(report_id))
+    t = re.sub(r'\s*-?\s*\d{1,2}:\d{2}\s*[AP]M(\s*ET)?\s*$', '', t)
+    return t.strip() or str(report_id)
+
 def report_month_options(n_months=18):
     """None (not specified) followed by the last n_months, newest first."""
     today = datetime.date.today()
@@ -1532,8 +1540,7 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
     add_text(s1, Inches(0.5), Inches(0.15), Inches(12.3), Inches(0.8),
              "Premion Website Attribution", 34, PERI, bold=True)
     # Client-facing: show the report DATE, not the pull time.
-    display_title = re.sub(r'\s*\(\d{1,2}:\d{2}\s*[AP]M[^)]*\)', '', str(report_title))
-    display_title = re.sub(r'\s*-?\s*\d{1,2}:\d{2}\s*[AP]M(\s*ET)?\s*$', '', display_title).strip()
+    display_title = clean_report_title(report_title)
     try:
         report_date = datetime.datetime.now(pytz.timezone("US/Eastern")).strftime("%B %d, %Y").replace(" 0", " ")
     except Exception:
@@ -2006,8 +2013,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
 
     # --- Title block (same wording as slide 1 of the deck) ---
     if report_title:
-        display_title = re.sub(r'\s*\(\d{1,2}:\d{2}\s*[AP]M[^)]*\)', '', str(report_title))
-        display_title = re.sub(r'\s*-?\s*\d{1,2}:\d{2}\s*[AP]M(\s*ET)?\s*$', '', display_title).strip()
+        display_title = clean_report_title(report_title)
     elif df['Dealer'].nunique() == 1:
         display_title = str(df['Dealer'].iloc[0])
     else:
@@ -3862,6 +3868,7 @@ def check_universal_status(url, session):
 
 # --- UI DASHBOARD ---
 st.title("🚗 Auto-Sales Intelligence Agent")
+st.caption("See which vehicles your campaign audience viewed – and how fast they're selling.")
 
 # Sidebar: File Upload
 st.sidebar.markdown("### 📥 New Analysis")
@@ -3890,7 +3897,7 @@ with st.sidebar.container(border=True):
 
 run_analysis_clicked = False
 if uploaded_file is not None:
-    run_analysis_clicked = st.sidebar.button("🚀 Run Diagnostic Analysis", type="primary", use_container_width=True)
+    run_analysis_clicked = st.sidebar.button("🚀 Build Inventory Impact Report", type="primary", use_container_width=True)
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
 # --- ADD A DEALER TO THE VAULT (salesperson-friendly) ---
@@ -4517,7 +4524,11 @@ if not is_admin():
             st.caption("Set ADMIN_KEY in settings to enable the admin tools.")
 
 if st.session_state.current_report_id is not None:
-    st.subheader(f"Viewing Report: {st.session_state.current_report_id}")
+    # Same framing as the downloads; the run time lives in Session History.
+    st.subheader(f"Inventory Impact Report  |  {clean_report_title(st.session_state.current_report_id)}")
+    _hdr_ctx = build_report_context(report_month=st.session_state.get('report_month_sel'))
+    if _hdr_ctx.get('header_meta'):
+        st.caption(_hdr_ctx['header_meta'])
     
     df = st.session_state.history[st.session_state.current_report_id].copy()
 
@@ -4655,7 +4666,7 @@ if st.session_state.current_report_id is not None:
                                 mime="application/pdf"
                             )
             else:
-                st.success("✅ All inventory syncs resolved! Click **Run Diagnostic Analysis** in the sidebar to complete the rescan.")
+                st.success("✅ All inventory syncs resolved! Click **Build Inventory Impact Report** in the sidebar to complete the rescan.")
 
     # 2. HIGH-ENGAGEMENT FILTER — one threshold, two ways to apply it.
     #    Highlight (default): the whole report stays on every viewed vehicle and
@@ -4748,8 +4759,6 @@ if st.session_state.current_report_id is not None:
         unique_visitors=st.session_state.get('unique_visitors_input', 0),
         total_visits=int(df['Attributed Unique Visitors'].sum())
     )
-    if _pre_ctx.get('header_meta'):
-        st.caption(_pre_ctx['header_meta'])
     st.caption("Vehicles our campaign audience viewed on the dealer's site.")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Viewed Vehicles Sold", m_units, help="Vehicles our campaign audience viewed that have since left the lot - influence and velocity, not purchases by our visitors.")
