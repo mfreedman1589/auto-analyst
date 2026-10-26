@@ -689,7 +689,12 @@ def high_engagement_stats(vdp_all, threshold):
     he['lift_pts'] = (round(he['ltb'] - he['lo_ltb'], 1)
                       if he['ltb'] is not None and he['lo_ltb'] is not None else None)
     he_sold_rows = vdp_all[hi & sold]
+    _hv_sold = vis[hi & sold]
+    he['avg_visits_sold'] = round(float(_hv_sold.mean()), 1) if len(_hv_sold) else None
     he['sold_type_counts'] = {str(k): int(v) for k, v in he_sold_rows['Type'].value_counts().items()}
+    _all_sold_rows = vdp_all[sold]
+    he['all_type_counts'] = {str(k): int(v) for k, v in _all_sold_rows['Type'].value_counts().items()}
+    he['all_tier_counts'] = {str(k): int(v) for k, v in _all_sold_rows['Price Tier'].value_counts().items()}
     he['sold_tier_counts'] = {str(k): int(v) for k, v in he_sold_rows['Price Tier'].value_counts().items()}
 
     # Comparison clusters: all vehicles, then like-for-like by condition.
@@ -728,7 +733,9 @@ def he_comparison_reason(he):
                 f"(needs {HE_MIN_GROUP_VIEWED}+ viewed on each side).")
     if all_g['lift_pts'] < HE_MIN_LIFT_PTS:
         return (f"high-engagement vehicles aren't selling meaningfully faster in this report "
-                f"({all_g['lift_pts']:+.1f} pts).")
+                f"({all_g['lift_pts']:+.1f} pts). That's common: a car that sits longer keeps "
+                f"collecting visits, and showroom cars draw browsers, so look-to-book often dips "
+                f"as the threshold rises. The strip shows avg. visits per sale instead.")
     bad = [g['label'].replace(' only', '').lower() for g in he['groups'] if g['lift_pts'] <= 0]
     return (f"the gap comes from the new/used mix, not engagement - among "
             f"{' and '.join(bad)} the high-engagement vehicles didn't sell faster.")
@@ -812,7 +819,7 @@ def build_high_engagement_images(he):
             ax.text(0, y + 0.43, lab, va="center", ha="left", fontsize=10.5, color="#333333")
         ax.set_xlim(0, top * 1.15); ax.set_ylim(-0.45, 3.0)
         ax.axis("off")
-        fig.suptitle("From Viewed to High-Engagement Sold", fontsize=13,
+        fig.suptitle(f"Viewed \u2192 Sold \u2192 {t}+ Visits", fontsize=13,
                      fontweight="bold", color=PREMION_NAVY, y=0.95)
         fig.subplots_adjust(left=0.04, right=0.98, top=0.83, bottom=0.04)
         images['he_funnel'] = _fig_to_png_bytes(fig, 5.6, 3.9, tight=False)
@@ -848,17 +855,61 @@ def build_high_engagement_images(he):
             images['he_ltb'] = _fig_to_png_bytes(fig, 5.6, 3.9, tight=False)
         except Exception:
             pass
-    elif he.get('sold_tier_counts'):
+    else:
         try:
-            tiers = sorted(he['sold_tier_counts'].items(), key=lambda kv: TIER_ORDER.index(kv[0])
-                           if kv[0] in TIER_ORDER else 99)
-            images['he_tiers'] = _donut_chart(
-                [v for _, v in tiers], [k for k, _ in tiers],
-                [TIER_COLORS.get(k, PREMION_BLUE) for k, _ in tiers],
-                f"{t}+ Visit Sales by Value Tier", str(he['sold']), "Sold")
+            images['he_mix'] = _he_mix_bars_image(he)
         except Exception:
             pass
     return images
+
+def _he_mix_bars_image(he):
+    """Export version of the dashboard's 'All sold vs. T+ visit sales' bars:
+    two 100% bars each for New/Used and Value Tier, same colours as the donuts."""
+    t = he['threshold']
+    specs = [("Sales Mix (New vs Used)", he.get('all_type_counts') or {}, he.get('sold_type_counts') or {},
+              ['New', 'Used'], TYPE_COLORS),
+             ("Sold Value Tiers", he.get('all_tier_counts') or {}, he.get('sold_tier_counts') or {},
+              TIER_ORDER, TIER_COLORS)]
+    fig, axes = plt.subplots(2, 1)
+    fig.patch.set_facecolor("white")
+    for ax, (title, allc, hec, order, cmap) in zip(axes, specs):
+        all_n, he_n = sum(allc.values()), sum(hec.values())
+        rows = [f"{t}+ visits ({he_n:,})", f"All sold ({all_n:,})"]
+        cats = [c for c in order if allc.get(c) or hec.get(c)] + \
+               [c for c in set(allc) | set(hec) if c not in order]
+        left = [0.0, 0.0]
+        for c in cats:
+            vals = [hec.get(c, 0) / he_n * 100 if he_n else 0, allc.get(c, 0) / all_n * 100 if all_n else 0]
+            ax.barh(rows, vals, left=left, color=cmap.get(c, PREMION_BLUE), height=0.62,
+                    label=str(c).replace('$', r'\$'))
+            for j, v in enumerate(vals):
+                if v >= 9:
+                    ax.text(left[j] + v / 2, j, f"{v:.0f}%", ha='center', va='center',
+                            color='white', fontsize=9, fontweight='bold')
+            left = [l + v for l, v in zip(left, vals)]
+        ax.set_xlim(0, 100); ax.set_xticks([])
+        for sp in ('top', 'right', 'bottom', 'left'):
+            ax.spines[sp].set_visible(False)
+        ax.tick_params(axis='y', length=0, labelsize=9.5)
+        ax.set_title(title, loc='left', fontsize=10.5, fontweight='bold', color=PREMION_NAVY)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(cats), frameon=False, fontsize=8)
+    fig.suptitle(f"All Sold vs. {t}+ Visit Sales", fontsize=13, fontweight="bold",
+                 color=PREMION_NAVY, y=0.97)
+    fig.subplots_adjust(left=0.24, right=0.97, top=0.80, bottom=0.07, hspace=0.8)
+    return _fig_to_png_bytes(fig, 5.6, 3.9, tight=False)
+
+def he_third_stat(he):
+    """Third figure on the summary strip. Look-to-book only when the comparison
+    holds; otherwise avg. campaign visits per high-engagement sale, so a client
+    never sees a lower rate next to the headline look-to-book."""
+    if he.get('comparison_ok') and he.get('ltb') is not None:
+        lo = f"{he['lo_ltb']:.1f}%"
+        return (f"{he['ltb']:.1f}%", f"look-to-book  (vs. {lo} at 1-{he['threshold'] - 1} visits)",
+                f"look-to-book (1-{he['threshold'] - 1} visits: {lo})")
+    if he.get('avg_visits_sold') is not None:
+        return (f"{he['avg_visits_sold']:.0f}", "avg. campaign visits per sale",
+                "avg. campaign visits per sale")
+    return None
 
 def he_stat_chips(he):
     """Three short facts about the subset for the export stat row."""
@@ -897,7 +948,7 @@ def build_kpi_band_image(metrics):
         fig = plt.figure(figsize=(10.6, 1.6))
         fig.patch.set_facecolor(PREMION_NAVY)
         kpis = [
-            ("VIEWED VEHICLES SOLD", str(metrics.get('units_sold', 0))),
+            ("VIEWED VEHICLES SOLD", f"{int(metrics.get('units_sold', 0) or 0):,}"),
             ("EST. VALUE SOLD", f"${float(metrics.get('rev_sold', 0)):,.0f}"),
             ("EST. TOTAL VALUE VIEWED", f"${float(metrics.get('pipeline', 0)):,.0f}"),
             ("LOOK-TO-BOOK RATIO", f"{metrics.get('ltb', 0)}%"),
@@ -1073,6 +1124,7 @@ def _he_facts(scope_vdp, threshold):
         'est_value_sold': _num(he['value_sold']) if he['sold'] else None,
         'est_value_viewed': _num(he['value_viewed']) if he['viewed'] else None,
         'share_of_sold_pct': he['sold_share_pct'],
+        'avg_visits_per_sale': he.get('avg_visits_sold'),
         'below_threshold': {k: v for k, v in {
             'viewed': he['lo_viewed'], 'sold': he['lo_sold'],
             'look_to_book_pct': he['lo_ltb']}.items() if v is not None},
@@ -1557,7 +1609,11 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
     units_val = metrics.get('units_sold', metrics.get('units', 0))
     rev_val = metrics.get('rev_sold', metrics.get('revenue', 0))
     ltb_val = metrics.get('ltb', 0)
-    kpis = [("Viewed Vehicles Sold", str(units_val)),
+    try:
+        units_fmt = f"{int(units_val):,}"
+    except Exception:
+        units_fmt = str(units_val)
+    kpis = [("Viewed Vehicles Sold", units_fmt),
             ("Est. Value Sold", _fmt_money(rev_val)),
             ("Est. Total Value Viewed", _fmt_money(metrics.get('pipeline', 0))),
             ("Look-to-Book Ratio", f"{ltb_val}%")]
@@ -1596,10 +1652,11 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
                  "HIGH-ENGAGEMENT SALES", 12, NAVY, bold=True)
         add_text(s1, Inches(0.70), Inches(5.64), Inches(3.5), Inches(0.40),
                  f"Viewed vehicles that drew {he['threshold']}+ campaign visits", 10.5, GREY)
-        _lift = he_lift_phrase(he)
         strip = [(f"{he['sold']:,}", f"of the {he['total_sold']:,} sold"),
-                 (_fmt_money(he['value_sold']), "est. value sold"),
-                 (f"{he['ltb']:.1f}%", "look-to-book" + (f"  ({_lift})" if _lift else ""))]
+                 (_fmt_money(he['value_sold']), "est. value sold")]
+        _third = he_third_stat(he)
+        if _third:
+            strip.append(_third[:2])
         for (big, small), x in zip(strip, (4.25, 6.55, 9.15)):
             add_text(s1, Inches(x), Inches(5.25), Inches(2.4), Inches(0.5), big, 20, NAVY, bold=True)
             add_text(s1, Inches(x), Inches(5.66), Inches(3.7 if x > 9 else 2.4), Inches(0.36),
@@ -1653,13 +1710,10 @@ def build_pptx_report(df, sold_df, metrics, chart_images, report_title,
         add_text(sh, Inches(0.5), Inches(1.25), Inches(12.3), Inches(0.45),
                  f"A conservative view of the {he['total_sold']:,} viewed vehicles sold: the "
                  f"{he['sold']:,} our audience came back to most often.", 13, GREY, italic=True)
-        right = chart_images.get('he_ltb') or chart_images.get('he_tiers')
+        right = chart_images.get('he_ltb') or chart_images.get('he_mix')
         if right is not None:
             add_picture_fit(sh, chart_images['he_funnel'], 0.45, 1.85, 6.0, 4.18)
-            if chart_images.get('he_ltb'):
-                add_picture_fit(sh, right, 6.85, 1.85, 6.0, 4.18)
-            else:
-                add_picture_fit(sh, right, 7.95, 1.80, 4.25, 4.25)
+            add_picture_fit(sh, right, 6.85, 1.85, 6.0, 4.18)
         else:
             add_picture_fit(sh, chart_images['he_funnel'], 3.65, 1.85, 6.0, 4.18)
         for i, (big, small) in enumerate(he_stat_chips(he)):
@@ -2080,11 +2134,11 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
         pdf.set_font("Arial", "", 7.5)
         pdf.set_text_color(107, 114, 128)
         pdf.cell(52, 5, safe_str(f"Vehicles with {he['threshold']}+ campaign visits"))
-        _lift = he_lift_phrase(he)
         cols = [(f"{he['sold']:,}", f"of the {he['total_sold']:,} sold", 28),
-                (f"${he['value_sold']:,.0f}", "est. value sold", 36),
-                (f"{he['ltb']:.1f}%", "look-to-book" + (f" (1-{he['threshold'] - 1} visits: "
-                                                        f"{he['lo_ltb']:.1f}%)" if _lift else ""), 52)]
+                (f"${he['value_sold']:,.0f}", "est. value sold", 36)]
+        _third = he_third_stat(he)
+        if _third:
+            cols.append((_third[0], _third[2], 52))
         x = 74
         for big, small, w in cols:
             pdf.set_xy(x, y0 + 1.5)
@@ -2171,7 +2225,7 @@ def create_pdf_report(df, sold_df, metrics, missed_df, include_missed, dealer_gr
                 f"{he['sold']:,} our audience came back to most often.")
         pdf.ln(2)
         image_pair(chart_images.get('he_funnel'),
-                   chart_images.get('he_ltb') or chart_images.get('he_tiers'))
+                   chart_images.get('he_ltb') or chart_images.get('he_mix'))
         chips = he_stat_chips(he)
         if chips:
             _ensure_space(16)
@@ -3872,17 +3926,38 @@ st.caption("See which vehicles your campaign audience viewed – and how fast th
 
 # Sidebar: File Upload
 st.sidebar.markdown("### 📥 New Analysis")
-uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'])
+uploaded_file = st.sidebar.file_uploader("Upload Traffic Report (CSV)", type=['csv'], key="csv_upload")
+
+# --- BUILD JOB: survives page restarts ---
+# Streamlit restarts the script whenever any control changes, which used to
+# cancel a scan in progress (and lose its work). A build is now a job held in
+# session state: a restart resumes it, skipping vehicles already checked.
+def _file_sig(f):
+    return (getattr(f, 'name', None), getattr(f, 'size', None)) if f is not None else None
+
+def _start_build():
+    st.session_state['_scan_job'] = {'file': _file_sig(st.session_state.get('csv_upload')),
+                                     'attempts': 0}
+    st.session_state['_scan_partial'] = {}
+
+_scan_job = st.session_state.get('_scan_job')
+if _scan_job and _scan_job.get('file') != _file_sig(uploaded_file):
+    st.session_state.pop('_scan_job', None)          # file removed or swapped: drop the job
+    st.session_state.pop('_scan_partial', None)
+    _scan_job = None
+_scan_busy = bool(_scan_job)
 
 # --- REPORT DETAILS (lookback window + visitor engagement) ---
 # Sits between the upload and the Run button so it's part of the normal flow,
 # not a hidden drawer. Still optional; can also be filled in on the report.
 with st.sidebar.container(border=True):
     st.markdown("**🗓️ Report Details**")
-    st.caption("Recommended. Adds the lookback window and pages per visitor to the "
+    st.caption("🔒 Locked while your report builds - you can edit these on the report "
+               "once it's ready." if _scan_busy else
+               "Recommended. Adds the lookback window and pages per visitor to the "
                "dashboard and downloads.")
     st.selectbox(
-        "Campaign month",
+        "Campaign month", disabled=_scan_busy, placeholder="— Not specified —",
         options=report_month_options(),
         format_func=format_report_month,
         key="report_month_sel",
@@ -3890,14 +3965,16 @@ with st.sidebar.container(border=True):
              "the inventory had to move before this scan."
     )
     st.number_input(
-        "Total unique visitors",
+        "Total unique visitors", disabled=_scan_busy,
         min_value=0, step=1, key="unique_visitors_input",
         help="From the Unified Dashboard. Enables the average pages-per-visitor stat."
     )
 
 run_analysis_clicked = False
 if uploaded_file is not None:
-    run_analysis_clicked = st.sidebar.button("🚀 Build Inventory Impact Report", type="primary", use_container_width=True)
+    st.sidebar.button("🚀 Build Inventory Impact Report", type="primary", use_container_width=True,
+                      on_click=_start_build, disabled=_scan_busy)
+    run_analysis_clicked = _scan_busy
     st.sidebar.info("Upload a CSV and click Run. If we need help locating the dealer's inventory database, we'll give you simple steps to sync it dynamically!")
 
 # --- ADD A DEALER TO THE VAULT (salesperson-friendly) ---
@@ -4025,6 +4102,13 @@ with st.sidebar.expander("🔐 Add Dealer to Vault", expanded=False):
 
 # Main Execution Logic
 if run_analysis_clicked:
+    _scan_job['attempts'] = _scan_job.get('attempts', 0) + 1
+    if _scan_job['attempts'] > 4:
+        st.session_state.pop('_scan_job', None)
+        st.session_state.pop('_scan_partial', None)
+        st.error("This report kept getting interrupted before it could finish. Please click "
+                 "**Build Inventory Impact Report** again and keep this tab open until it's done.")
+        st.stop()
     df_raw = pd.read_csv(uploaded_file)
     uploaded_file.seek(0)
     
@@ -4055,6 +4139,7 @@ if run_analysis_clicked:
                     _visit_col = _c
                     break
         if _visit_col is None:
+            st.session_state.pop('_scan_job', None)
             st.error("❌ Couldn't find a visits column in this CSV. Expected "
                      "**Attributed Unique Visitors** (or Unique Visits / Visitors). "
                      f"Columns found: {', '.join(str(c) for c in df_raw.columns)}")
@@ -4080,8 +4165,16 @@ if run_analysis_clicked:
     df_raw['Dealer'] = df_raw['Page Url'].apply(lambda x: dealer_display_name(x, is_multi_dealer)) 
     vdp_urls = df_raw[df_raw['Category'] == 'VDP']['Page Url'].tolist()
     
-    st.info(f"Scanning {len(vdp_urls):,} vehicles for current availability...")
-    progress_bar = st.progress(0)
+    _partial = st.session_state.setdefault('_scan_partial', {})
+    vdp_results = _partial.setdefault('vdp_results', {})   # survives a page restart
+    _done = sum(1 for u in vdp_urls if u in vdp_results)
+    if _done:
+        st.info(f"Picking up where the scan left off - {_done:,} of {len(vdp_urls):,} vehicles "
+                f"already checked...")
+    else:
+        st.info(f"Scanning {len(vdp_urls):,} vehicles for current availability...")
+    st.caption("Keep this tab open until your report appears - a large dealer group can take a few minutes.")
+    progress_bar = st.progress(_done / len(vdp_urls) if vdp_urls else 0)
     
     session = requests.Session()
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
@@ -4089,26 +4182,30 @@ if run_analysis_clicked:
     session.mount('https://', adapter)
     session.mount('http://', adapter)
     
-    vdp_results = {}
-
     # Per-run blacklist of domains whose API blocked us (403/401/429). Once a
     # domain lands here, every remaining VDP for it skips the API entirely.
     ignored_domains = set()
     ignore_lock = threading.Lock()
 
     # Resolve vaulted dealers' inventory in bulk before the per-car scan.
-    with st.spinner("Checking dealer inventories..."):
-        vin_status = build_all_vin_status(vdp_urls, session)
+    if 'vin_status' in _partial:
+        vin_status = _partial['vin_status']
+    else:
+        with st.spinner("Checking dealer inventories..."):
+            vin_status = build_all_vin_status(vdp_urls, session)
+        _partial['vin_status'] = vin_status
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-        future_to_url = {
-            executor.submit(scan_url, url, session, ignored_domains, ignore_lock, vin_status): url
-            for url in vdp_urls
-        }
-        total_urls = len(vdp_urls)
-        # Update the progress bar at most ~100 times, not once per URL — on a
-        # 1,000+ car report, per-URL updates flood the UI and slow the run.
-        progress_step = max(1, total_urls // 100)
+    _todo = [u for u in dict.fromkeys(vdp_urls) if u not in vdp_results]
+    total_urls = len(vdp_urls)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=30)
+    future_to_url = {
+        executor.submit(scan_url, url, session, ignored_domains, ignore_lock, vin_status): url
+        for url in _todo
+    }
+    # Update the progress bar at most ~100 times, not once per URL — on a
+    # 1,000+ car report, per-URL updates flood the UI and slow the run.
+    progress_step = max(1, total_urls // 100)
+    try:
         for i, future in enumerate(concurrent.futures.as_completed(future_to_url)):
             url = future_to_url[future]
             try:
@@ -4116,8 +4213,20 @@ if run_analysis_clicked:
             except Exception:
                 # A single malformed URL must never abort a large report.
                 vdp_results[url] = "ERROR (Scan Failed)"
-            if (i + 1) % progress_step == 0 or (i + 1) == total_urls:
-                progress_bar.progress((i + 1) / total_urls)
+            n_done = _done + i + 1
+            if n_done % progress_step == 0 or n_done == total_urls:
+                progress_bar.progress(min(n_done / total_urls, 1.0))
+    finally:
+        # If the page restarts mid-scan, keep whatever already finished and drop
+        # the queued work so the restart is immediate (it used to wait for every
+        # remaining vehicle, then throw the results away).
+        for _f, _u in future_to_url.items():
+            if _u not in vdp_results and _f.done() and not _f.cancelled():
+                try:
+                    vdp_results[_u] = _f.result()
+                except Exception:
+                    pass
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # --- EXTERNAL FALLBACK: resolve anything the normal scan couldn't ------
     # Locked dealers (API rejected + firewall-blocked) leave "ERROR" results.
@@ -4381,7 +4490,9 @@ if run_analysis_clicked:
     
     st.session_state.history[report_id] = df
     st.session_state.current_report_id = report_id
-    
+    st.session_state.pop('_scan_job', None)
+    st.session_state.pop('_scan_partial', None)
+
     st.rerun()
 
 # --- SIDEBAR: SESSION HISTORY MANAGER ---
@@ -4857,6 +4968,48 @@ if st.session_state.current_report_id is not None:
 
     st.divider()
 
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Traffic Mix**")
+        traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
+        traffic_data = traffic_data.rename(columns={'Attributed Unique Visitors': 'Unique Visits'})
+        fig1 = px.bar(traffic_data, x='Category', y='Unique Visits', labels={'Unique Visits': 'Unique Visits'})
+        st.plotly_chart(fig1, use_container_width=True)
+    with c2:
+        st.markdown("**Sales Mix (New vs Used)**")
+        if not sold_df.empty:
+            type_counts = sold_df['Type'].value_counts().reset_index()
+            type_counts.columns = ['Type', 'Count']
+            fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', color_discrete_map=TYPE_COLORS, hover_data=['Count'])
+            fig2.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig2, use_container_width=True)
+            if he is not None and he['sold']:
+                _cmp = mix_compare_plotly(sold_df['Type'].value_counts().to_dict(),
+                                          he['sold_type_counts'], ['New', 'Used'], TYPE_COLORS,
+                                          he['threshold'])
+                if _cmp is not None:
+                    st.caption(f"⭐ All sold vs. {he['threshold']}+ visit sales")
+                    st.plotly_chart(_cmp, use_container_width=True, config={'displayModeBar': False})
+    with c3:
+        st.markdown("**Sold Value Tiers**")
+        if not sold_df.empty:
+            tier_counts = sold_df['Price Tier'].value_counts().reset_index()
+            tier_counts.columns = ['Price Tier', 'Count']
+            fig3 = px.pie(tier_counts, values='Count', names='Price Tier', color='Price Tier',
+                          color_discrete_map=TIER_COLORS, category_orders={'Price Tier': TIER_ORDER},
+                          hover_data=['Count'])
+            fig3.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig3, use_container_width=True)
+            if he is not None and he['sold']:
+                _cmp = mix_compare_plotly(sold_df['Price Tier'].value_counts().to_dict(),
+                                          he['sold_tier_counts'], TIER_ORDER, TIER_COLORS,
+                                          he['threshold'])
+                if _cmp is not None:
+                    st.caption(f"⭐ All sold vs. {he['threshold']}+ visit sales")
+                    st.plotly_chart(_cmp, use_container_width=True, config={'displayModeBar': False})
+
+    st.divider()
+
     domain_count = df['Dealer'].nunique()
     dealer_group_export = None
 
@@ -4981,48 +5134,6 @@ if st.session_state.current_report_id is not None:
 
 
         st.divider()
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("**Traffic Mix**")
-        traffic_data = df.groupby('Category')['Attributed Unique Visitors'].sum().reset_index().sort_values('Attributed Unique Visitors', ascending=False)
-        traffic_data = traffic_data.rename(columns={'Attributed Unique Visitors': 'Unique Visits'})
-        fig1 = px.bar(traffic_data, x='Category', y='Unique Visits', labels={'Unique Visits': 'Unique Visits'})
-        st.plotly_chart(fig1, use_container_width=True)
-    with c2:
-        st.markdown("**Sales Mix (New vs Used)**")
-        if not sold_df.empty:
-            type_counts = sold_df['Type'].value_counts().reset_index()
-            type_counts.columns = ['Type', 'Count']
-            fig2 = px.pie(type_counts, values='Count', names='Type', color='Type', color_discrete_map=TYPE_COLORS, hover_data=['Count'])
-            fig2.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig2, use_container_width=True)
-            if he is not None and he['sold']:
-                _cmp = mix_compare_plotly(sold_df['Type'].value_counts().to_dict(),
-                                          he['sold_type_counts'], ['New', 'Used'], TYPE_COLORS,
-                                          he['threshold'])
-                if _cmp is not None:
-                    st.caption(f"⭐ All sold vs. {he['threshold']}+ visit sales")
-                    st.plotly_chart(_cmp, use_container_width=True, config={'displayModeBar': False})
-    with c3:
-        st.markdown("**Sold Value Tiers**")
-        if not sold_df.empty:
-            tier_counts = sold_df['Price Tier'].value_counts().reset_index()
-            tier_counts.columns = ['Price Tier', 'Count']
-            fig3 = px.pie(tier_counts, values='Count', names='Price Tier', color='Price Tier',
-                          color_discrete_map=TIER_COLORS, category_orders={'Price Tier': TIER_ORDER},
-                          hover_data=['Count'])
-            fig3.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig3, use_container_width=True)
-            if he is not None and he['sold']:
-                _cmp = mix_compare_plotly(sold_df['Price Tier'].value_counts().to_dict(),
-                                          he['sold_tier_counts'], TIER_ORDER, TIER_COLORS,
-                                          he['threshold'])
-                if _cmp is not None:
-                    st.caption(f"⭐ All sold vs. {he['threshold']}+ visit sales")
-                    st.plotly_chart(_cmp, use_container_width=True, config={'displayModeBar': False})
-
-    st.divider()
 
     t1, t2 = st.columns(2)
     with t1:
